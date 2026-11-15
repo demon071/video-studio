@@ -1,0 +1,89 @@
+# ---------------------------------------------------------------------------
+# ShortVideoAI — AI stack (offline-first pipeline)
+# Heavy install (~2-4 GB incl. torch). Install with:
+#   pip install -r requirements-ai.txt
+# `torch` is NOT listed here on purpose. On Windows the PyPI wheel is
+# CPU-only, and installing it after the CUDA build silently downgrades the
+# engine to CPU inference. setup_dev.ps1 therefore installs this file FIRST and
+# re-installs torch/torchvision from https://download.pytorch.org/whl/cu130
+# afterwards. If you install by hand, do the same order.
+# ---------------------------------------------------------------------------
+
+# --- Numeric foundation ---
+numpy>=2.0,<3.0
+scipy>=1.18,<2.0
+soundfile>=0.14
+
+# --- Speech to text (offline) ---
+# faster-whisper decodes *file* inputs with PyAV's `metadata_errors=` keyword,
+# which PyAV removed in 14.0 (the AI stack installs PyAV 19 for
+# audio-separator). The engine therefore reads its 16 kHz WAV with soundfile and
+# passes a float32 numpy array to model.transcribe(), which is faster and keeps
+# the two libraries independent. Do not "fix" this by downgrading PyAV.
+faster-whisper>=1.2,<2.0
+ctranslate2>=4.9,<5.0
+# SenseVoice (zh/en/ja/ko/yue) through sherpa-onnx: the CPU path for Chinese
+# drama, and the one engine that cannot answer with the wrong language. The
+# weights (240 MB) download on first use from the Model tab.
+sherpa-onnx>=1.12
+
+# --- ONNX runtime (OCR detectors, SenseVoice) ---
+onnxruntime>=1.32,<2.0
+
+# --- TTS (offline) ---
+# Nothing to install for the default dub: CapCut's voices are plain HTTPS calls.
+# The offline engines are optional extras:
+#
+#   OmniVoice (github.com/k2-fsa/OmniVoice) runs in-process on torch:
+#     pip install torchaudio==2.11.1 --no-deps
+#     pip install omnivoice
+#   Order matters, twice over. torchaudio is frozen at 2.11 (PyTorch stopped
+#   shipping it), and its PyPI wheel pins torch==2.11.1: plain
+#   `pip install torchaudio` therefore drags the CUDA torch 2.14 build back to a
+#   CPU 2.11 one. --no-deps installs the wheel alone and it imports and resamples
+#   fine against torch 2.14; `omnivoice` imports it at module level, so it is
+#   mandatory even though we never call it directly.
+#   The weights (k2-fsa/OmniVoice, 3.3 GB) land in models\tts\omnivoice-v1 on the
+#   first dubbed line.
+#
+#   VoiceStudio (github.com/debpalash/voicestudio) is a separate local server
+#   exposing the OpenAI speech API on http://127.0.0.1:3900/v1: no package here,
+#   just start it (Docker image ghcr.io/debpalash/voicestudio) and pick
+#   "VoiceStudio" in the AI panel.
+
+# --- Vocal isolation (keep background music under the dub) ---
+# MDX-Net models run on ONNX Runtime; pulls librosa + extra audio libs.
+audio-separator>=0.48,<1.0
+
+# --- Translation (offline LLM, GGUF / Qwen2.5 · Gemma 3) ---
+# Prebuilt Windows wheels: https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python>=0.3.36
+
+# --- Online providers (used when provider=api) ---
+openai>=3.50
+google-genai>=3.3
+
+# --- Optional provider extras ----------------------------------------------
+# Nothing below is required by the default pipeline (local Whisper + Qwen/Gemma
+# + CapCut voice). Install only the provider you plan to select in the AI panel:
+#
+#   provider=ocr       -> one OCR engine (first match wins, see SVA_OCR_ENGINE)
+#   provider=omnivoice -> pip install omnivoice (see "TTS (offline)" above)
+#
+# CapCut and Bilibili BCut need no package: both are plain HTTPS calls.
+# rapidocr is the small, ONNX-only engine and downloads its models on first
+# use. The `rapidocr` package resolves multilingual models from a language
+# code (SVA_OCR_LANGUAGE=vi), the older `rapidocr-onnxruntime` wheel ships the
+# Chinese pair only and drops Vietnamese diacritics - prefer `rapidocr`.
+# pip install rapidocr
+# pip install paddleocr        # pulls PaddlePaddle (~700 MB)
+# pip install easyocr          # pulls torchvision
+#
+# --- GPU for OCR: one ONNX Runtime build at a time --------------------------
+# `onnxruntime` (above) is the CPU wheel OCR uses by default and the one the
+# rest of the stack imports. The GPU builds install the SAME `onnxruntime`
+# module, so they replace it instead of being added: install
+# `requirements-ocr-gpu.txt` (DirectML, any DX12 card) or
+# `pip install onnxruntime-gpu` (NVIDIA + CUDA 12 + cuDNN 9) after this file,
+# and re-run that swap after any future `pip install -r requirements-ai.txt`.
+# scripts/setup_dev.ps1 -OcrGpu / -OcrCuda does both steps for you.

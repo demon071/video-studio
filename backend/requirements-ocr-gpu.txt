@@ -1,0 +1,28 @@
+# ---------------------------------------------------------------------------
+# ShortVideoAI — ONNX Runtime GPU build, for OCR on the GPU
+#
+# The three ONNX Runtime distributions (`onnxruntime`, `onnxruntime-directml`,
+# `onnxruntime-gpu`) all install the *same* `onnxruntime` package, so this is a
+# swap, never an extra requirement: uninstall the CPU wheel first, then install
+# exactly one of the two GPU builds.
+#
+#   pip uninstall -y onnxruntime onnxruntime-directml onnxruntime-gpu
+#   pip install -r requirements-ocr-gpu.txt          # DirectML (below)
+#
+# Settings → OCR → "Thiết bị chạy" then reports "Đang đọc bằng GPU". Choosing
+# CPU there still reads on the CPU: the GPU flags are only passed when the GPU
+# is wanted, and a missing driver falls back to CPU instead of failing a job.
+#
+# Re-run this file after any `pip install -r requirements-ai.txt`, because it
+# depends on `onnxruntime` and pip would put the CPU wheel back.
+# scripts/setup_dev.ps1 -OcrGpu does that swap for you.
+#
+# `pip check` then reports "requires onnxruntime, which is not installed" for
+# sherpa-onnx / audio-separator / rapidocr-onnxruntime: the module they import is
+# exactly the one this wheel provides, so the warning is expected and harmless.
+#
+# NVIDIA + the CUDA 12 runtime + cuDNN 9 (usually more than twice as fast):
+#   pip install onnxruntime-gpu>=1.32,<2.0
+# DirectML needs no CUDA at all — any DX12 card (NVIDIA, AMD, Intel):
+# ---------------------------------------------------------------------------
+onnxruntime-directml>=1.24,<2.0

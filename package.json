@@ -1,0 +1,31 @@
+{
+  "name": "short-video-ai",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Windows-first short-form video editor: offline AI subtitles, translation, dubbing and FFmpeg render (Tauri v2 + React + FastAPI).",
+  "workspaces": [
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup_dev.ps1",
+    "check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check_env.ps1",
+    "dev": "concurrently -k -n BACKEND,APP -c cyan,magenta \"npm:dev:backend\" \"npm:dev:app\"",
+    "dev:app": "npm run dev --workspace frontend",
+    "dev:web": "npm run dev:web --workspace frontend",
+    "dev:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev_backend.ps1",
+    "build": "npm run build --workspace frontend",
+    "build:app": "npm run build:app --workspace frontend",
+    "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_backend.ps1 -Flavor core",
+    "build:backend:full": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_backend.ps1 -Flavor full",
+    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Flavor core",
+    "build:windows:full": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Flavor full",
+    "build:pack": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make_ai_pack.ps1",
+    "typecheck": "npm run typecheck --workspace frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.7"
+  }
+}

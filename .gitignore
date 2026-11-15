@@ -1,0 +1,76 @@
+# ---------- Node / Frontend ----------
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+.eslintcache
+npm-debug.log*
+
+# ---------- Tauri / Rust ----------
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
+frontend/src-tauri/.cargo/
+
+# ---------- Python ----------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---------- Python build output (PyInstaller) ----------
+backend/build/
+backend/dist/
+backend/packaging/__pycache__/
+build/
+
+# ---------- Packaged installers ----------
+release/
+
+# ---------- Bundled binaries (downloaded by setup) ----------
+resources/ffmpeg/
+resources/binaries/
+frontend/src-tauri/binaries/
+frontend/src-tauri/resources/engine/
+frontend/src-tauri/resources/ffmpeg/
+
+# ---------- Local AI models / caches (never commit) ----------
+models/
+.cache/
+*.gguf
+*.onnx
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# ---------- Secrets & env ----------
+.env
+.env.*
+!.env.example
+
+# ---------- Logs / temp ----------
+*.log
+logs/
+tmp/
+.tmp/
+Thumbs.db
+desktop.ini
+
+# ---------- Local sample project & dub artifacts ----------
+/*.mp4
+/*.wav
+/*.srt
+/*.ass
+/*.dub-parts/
+/*.dub-lock-parts/
+/*.vi.dub.wav
+/*.vi.dub-lock.wav
+pipeline-check/
+
+# ---------- Qoder / agent tooling ----------
+.agent_harnesses.json
