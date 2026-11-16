@@ -1,15 +1,14 @@
-# YÊU CẦU XÂY DỰNG ỨNG DỤNG MỚI HOÀN TOÀN TỪ CAPCAP (v9.0.1)
+# YÊU CẦU XÂY DỰNG ỨNG DỤNG MỚI: LÕI TÍNH NĂNG CAPCAP (v9.0.1) + GIAO DIỆN NLE STUDIO HIỆN ĐẠI (PHONG CÁCH CAPCUT DESKTOP)
 
 ## 1. BỐI CẢNH & MỤC TIÊU DỰ ÁN
-Xây dựng một ứng dụng Desktop chuyên nghiệp **mới hoàn toàn từ con số 0 (from scratch)** dùng để biên tập video ngắn, tự động nhận dạng giọng nói/phụ đề cứng (ASR/OCR), dịch thuật AI đa ngữ cảnh, lồng tiếng đa nhân vật (TTS) và xuất bản video/CapCut Draft.
+Xây dựng một ứng dụng Desktop biên tập, tách phụ đề, dịch thuật AI và lồng tiếng video tự động **mới hoàn toàn từ con số 0 (from scratch)** theo hai định hướng rõ ràng:
 
-- **Nguồn chuẩn duy nhất về tính năng, thuật toán & giao diện (Single Source of Truth)**:
-  - **`CapCap` (v9.0.1)**: Nguồn tham chiếu 1:1 cho toàn bộ chức năng, luồng nghiệp vụ (workflow), thuật toán xử lý, cấu trúc dữ liệu, prompt dịch thuật, danh mục giọng đọc và bố cục giao diện người dùng (UI/UX).
-
-### Nguyên tắc cốt lõi:
-1. **Xây dựng mới 100%**: Tự thiết kế kiến trúc thư mục chuẩn mực, sạch sẽ từ đầu; chuyển đổi toàn bộ chức năng của `CapCap` (vốn viết bằng `CustomTkinter`) sang kiến trúc **Client–Server Desktop hiện đại**.
-2. **Bảo toàn tuyệt đối 100% tính năng & thuật toán của CapCap**: Mọi công thức xử lý thời gian, làm sạch phụ đề, phân vai người nói, phân tích ngữ cảnh xưng hô, giãn hình khớp giọng đọc (Fit Voice / Time-Warp), trộn âm thanh 3 kênh, hiệu ứng lớp phủ hình ảnh, hàng đợi xử lý hàng loạt và công cụ FFmpeg của `CapCap` đều phải được chuyển đổi đầy đủ, chính xác.
-3. **Ngôn ngữ hiển thị**: 100% Tiếng Việt, giữ nguyên hệ thống thuật ngữ quen thuộc của `CapCap`.
+1. **Lõi tính năng, thuật toán & quy trình xử lý (Backend & AI Pipeline)**:
+   - Lấy **`CapCap` (v9.0.1)** làm **nguồn chuẩn duy nhất (Single Source of Truth)**.
+   - Chuyển đổi đầy đủ 100% tính năng, công thức tính toán, bộ lọc làm sạch phụ đề, phân vai người nói, dịch thuật ngữ cảnh, lồng tiếng đa nhân vật, giãn hình khớp giọng (Fit Voice / Time-Warp), trộn âm thanh 3 kênh, hàng đợi xử lý hàng loạt và công cụ FFmpeg từ `CapCap`.
+2. **Giao diện & Trải nghiệm người dùng (Frontend UI/UX)**:
+   - **KHÔNG sử dụng hay bắt chước bố cục giao diện cũ của `CapCap`**.
+   - **Thiết kế mới hoàn toàn theo chuẩn trình dựng phim chuyên nghiệp (Modern NLE Video Studio)** tương tự **CapCut Desktop, DaVinci Resolve, Adobe Premiere Pro**: bố cục 4 vùng có thể kéo giãn kích thước (Dockable/Resizable Panes), thanh công cụ bên trái theo ngữ cảnh (Icon Rail + Drawer), màn hình Canvas tương tác trực quan ở giữa, bảng thuộc tính thông minh bên phải (Context-Aware Inspector) và Timeline đa tầng trải rộng toàn màn hình phía dưới.
 
 ---
 
@@ -19,21 +18,21 @@ Xây dựng một ứng dụng Desktop chuyên nghiệp **mới hoàn toàn từ
 - **Ngôn ngữ & Framework**: Python 3.11+, **FastAPI**, **Uvicorn**, **Pydantic v2**.
 - **Giao tiếp thời gian thực**:
   - **REST API**: Quản lý dự án, cấu hình, thực thi từng bước hoặc toàn bộ pipeline, truy vấn danh sách model/giọng đọc, điều khiển hàng đợi.
-  - **WebSocket (`/ws/events`)**: Truyền phát trực tiếp (real-time streaming) phần trăm tiến độ (`progress`), bước xử lý hiện tại (`stage`), từng câu phụ đề vừa nhận dạng/dịch xong, trạng thái hàng đợi (`queue_state`) và nhật ký hệ thống (`logs`).
+  - **WebSocket (`/ws/events`)**: Truyền phát trực tiếp (real-time streaming) phần trăm tiến độ (`progress`), bước xử lý hiện tại (`stage`), từng câu phụ đề vừa nhận dạng/dịch xong, dữ liệu dạng sóng âm thanh (`waveform`), trạng thái hàng đợi (`queue_state`) và nhật ký hệ thống (`logs`).
 - **Tăng tốc phần cứng (Hardware & GPU Acceleration)**:
   - Tự động phát hiện và đăng ký đường dẫn DLL cho cả **CUDA 12** (`nvidia/cublas/bin`, `nvidia/cudnn/bin` phục vụ `ctranslate2` / `faster-whisper`) và **CUDA 13** (`torch/lib` phục vụ `onnxruntime-gpu` / `RapidOCR`).
   - Hỗ trợ mã hóa video bằng phần cứng **NVIDIA NVENC (`h264_nvenc`)** và tự động lùi về `libx264` khi chạy trên CPU.
 
 ### 2.2. Frontend & Desktop Shell (`frontend/`)
 - **Giao diện người dùng**: **React 19 + TypeScript + Vite + Tailwind CSS + Lucide Icons**.
-- **Quản lý trạng thái**: **Zustand** (lưu trữ trạng thái dự án, danh sách phụ đề TS1/TS2, các lớp phủ hình ảnh, cấu hình pipeline, lịch sử Undo/Redo và đồng bộ thời gian thực với Backend).
+- **Quản lý trạng thái**: **Zustand** (lưu trữ trạng thái dự án, các track trên Timeline, danh sách phụ đề TS1/TS2, các lớp phủ hình ảnh, đối tượng đang chọn trên Inspector, lịch sử Undo/Redo `Ctrl+Z`/`Ctrl+Y`).
 - **Desktop Runtime**: **Tauri v2 (`src-tauri/`)**:
   - Khởi chạy và giám sát tiến trình Python FastAPI dưới dạng Sidecar hoặc Local Daemon.
-  - Cung cấp hộp thoại chọn file/thư mục gốc của Windows, kéo-thả file trực tiếp từ File Explorer và phát trực tiếp media cục bộ qua giao thức `asset://`.
+  - Cung cấp hộp thoại chọn file/thư mục gốc của hệ điều hành, kéo-thả file trực tiếp từ ngoài vào Media Bin/Timeline và phát trực tiếp media cục bộ qua giao thức `asset://`.
 
 ---
 
-## 3. ĐẶC TẢ CHI TIẾT CÁC PHÂN HỆ CHỨC NĂNG (THAM CHIẾU 1:1 TỪ `CapCap`)
+## 3. ĐẶC TẢ CHI TIẾT CÁC PHÂN HỆ LÕI (THAM CHIẾU 1:1 TỪ `CapCap`)
 
 ### 3.1. Phân hệ Nhận dạng Phụ đề (ASR), Làm sạch & Phân vai (Speaker Diarization)
 **File tham chiếu gốc trong `CapCap`**:
@@ -48,7 +47,7 @@ Xây dựng một ứng dụng Desktop chuyên nghiệp **mới hoàn toàn từ
 **Yêu cầu triển khai**:
 1. **Faster-Whisper**:
    - Hỗ trợ các model `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo` thông qua `BatchedInferencePipeline` (`batch_size=8`), kiểu tính toán `int8_float16` trên GPU (hoặc `int8` trên CPU).
-   - **Lọc ảo giác (Hallucination Filter)**: Tự động loại bỏ các đoạn lặp từ bất thường, các câu xuất hiện trong khoảng lặng dài hơn ngưỡng `hallucination_silence_threshold` (mặc định `1.2s`), và các mẫu câu rác kinh điển của Whisper.
+   - **Lọc ảo giác (Hallucination Filter)**: Tự động loại bỏ các đoạn lặp từ bất thường, các câu xuất hiện trong khoảng lặng dài hơn ngưỡng `hallucination_silence_threshold` (mặc định `1.2s`), và các mẫu câu rác của Whisper.
    - **Gộp câu trùng lặp ở biên đoạn (`AsrMergeService`)**: Khi `dedup_enabled=True` (ngưỡng `dedup_similarity=0.82`), tự động gộp các câu liền kề bị lặp chữ hoặc câu ngắn nằm trọn trong câu dài có nghĩa (`_is_informative_containment`: từ 10 ký tự chữ/số và 3 từ trở lên, hoặc từ 8 chữ Hán trở lên).
 2. **SenseVoice (Sherpa-ONNX)**:
    - Chuyển đổi nguyên bản thuật toán `_smart_split_sensevoice_tokens`: tách câu theo dấu câu kết thúc (`.?!。？！`), dấu phẩy, khoảng nghỉ ngắn/dài (`0.4s` / `0.8s`), giới hạn chiều dài câu CJK (`26` ký tự) và Latin (`65` ký tự), đồng thời gộp các từ cảm thán 1 âm tiết (`啊`, `哦`, `呢`, `吧`...) vào câu liền kề.
@@ -61,7 +60,7 @@ Xây dựng một ứng dụng Desktop chuyên nghiệp **mới hoàn toàn từ
    - Tùy chọn tách riêng giọng nói khỏi nhạc nền ồn ào trước khi đưa vào Whisper/SenseVoice để tăng độ chính xác.
 6. **Quét lại theo Khoảng chọn (Range Re-Transcribe) & Nhập file SRT**:
    - Cho phép chọn một khoảng thời gian `[start_time, end_time]` trên Timeline và chạy lại riêng khoảng đó bằng engine đối lập (**Alt: OCR** hoặc **Alt: Whisper**), tự động ghép kết quả mới vào đúng vị trí trong danh sách phụ đề.
-   - Hỗ trợ nhập trực tiếp file `.srt` vào Phụ đề chính (TS1) hoặc Phụ đề phụ (TS2).
+   - Hỗ trợ nhập trực tiếp file `.srt` vào Track Phụ đề chính (TS1) hoặc Track Phụ đề phụ (TS2).
 
 ---
 
@@ -71,7 +70,7 @@ Xây dựng một ứng dụng Desktop chuyên nghiệp **mới hoàn toàn từ
 
 **Yêu cầu triển khai**:
 1. **Streaming Khung hình & Tiền xử lý Ảnh**:
-   - Đọc khung hình trực tiếp từ video (hỗ trợ FFmpeg rawvideo pipe với hàng đợi trong RAM để tối ưu tốc độ).
+   - Đọc khung hình trực tiếp từ video qua FFmpeg rawvideo pipe với hàng đợi trong RAM để đạt tốc độ tối đa.
    - Áp dụng bộ lọc mặt nạ chữ trắng/vàng viền tối (HSV mask + binary outline mask), làm tối nền `_dim_background_for_ocr`, phát hiện khung hình rỗng `_is_blank_region`.
    - So sánh độ sai khác mặt nạ chữ giữa 2 khung hình liên tiếp: nếu chữ trên hình chưa thay đổi thì tái sử dụng ngay kết quả frame trước, giảm 60–80% số lần gọi mô hình OCR.
 2. **Làm sạch Văn bản OCR & Khôi phục Bộ thủ Chữ Hán**:
@@ -82,7 +81,7 @@ Xây dựng một ứng dụng Desktop chuyên nghiệp **mới hoàn toàn từ
 4. **Chế độ Bù lỗ hổng Âm thanh bằng OCR (OCR Hole-Filling)**:
    - Sau khi chạy ASR âm thanh, tự động tìm các khoảng thời gian có tiếng động nhưng ASR bỏ sót chữ để quét bổ sung bằng OCR.
 5. **Công cụ Quét & Dịch Vùng Ảnh Bất Kỳ (`OCR Region Translator`)**:
-   - Cho phép khoanh một vùng bất kỳ trên khung hình video (bảng hiệu, tin nhắn, chú thích), bấm 1 nút để OCR đọc chữ, dịch sang ngôn ngữ đích và tự động tạo một lớp `Text Layer` che đè lên vùng chữ gốc.
+   - Cho phép khoanh một vùng bất kỳ trên khung hình video (bảng hiệu, tin nhắn, chú thích), bấm 1 nút để OCR đọc chữ, dịch sang ngôn ngữ đích và tự động tạo một clip `Text Layer` trên Timeline che đè lên vùng chữ gốc.
 
 ---
 
@@ -108,7 +107,7 @@ Xây dựng một ứng dụng Desktop chuyên nghiệp **mới hoàn toàn từ
      - `Không phụ đề` (`none`)
      - `Có phụ đề - Đơn ngữ` (`single`: chỉ hiển thị Phụ đề chính TS1)
      - `Song ngữ` (`bilingual`: hiển thị đồng thời Phụ đề chính TS1 và Phụ đề phụ TS2)
-   - TS1 và TS2 có dữ liệu dòng riêng, bộ kiểu dáng (`SubtitleStyle`) riêng, vị trí hiển thị riêng trên màn hình và làn (track) riêng trên Timeline.
+   - TS1 và TS2 hoạt động như 2 Text Track độc lập trên Timeline, có kiểu dáng (`SubtitleStyle`) và vị trí riêng biệt.
 
 ---
 
@@ -129,7 +128,7 @@ Xây dựng một ứng dụng Desktop chuyên nghiệp **mới hoàn toàn từ
    - **Piper TTS** & **VieNeu TTS** (tổng hợp giọng đọc tiếng Việt offline tốc độ cao).
    - **OmniVoice** & **VoiceStudio Local Server**.
 2. **Phân vai Giọng đọc Đa Nhân vật (Multi-Speaker Voice Assignment)**:
-   - Cho phép gán giọng đọc riêng cho từng nhãn `SPEAKER_XX`, cũng như ghi đè giọng đọc (`voice`) và tốc độ đọc (`speed`) trên từng câu phụ đề riêng lẻ.
+   - Cho phép gán giọng đọc riêng cho từng nhãn `SPEAKER_XX`, cũng như ghi đè giọng đọc (`voice`) và tốc độ đọc (`speed`) trên từng clip phụ đề riêng lẻ.
    - Hỗ trợ nghe thử giọng (`Preview Voice`), nghe lại từng câu đã lồng tiếng và tạo lại TTS cho đúng 1 câu vừa sửa chữ mà không cần chạy lại toàn bộ video.
 3. **Chính sách Cắt Khoảng Lặng Đầu/Cuối (`tts_audio_policy.py`)**:
    - Tự động cắt bỏ khoảng lặng thừa ở đầu và cuối mỗi đoạn âm thanh TTS (`BOUNDARY_SILENCE_DB = -60.0`, `BOUNDARY_MIN_SILENCE_SECONDS = 0.35`, giữ đệm tự nhiên `BOUNDARY_PADDING_SECONDS = 0.12`).
@@ -185,64 +184,116 @@ Xây dựng một ứng dụng Desktop chuyên nghiệp **mới hoàn toàn từ
 1. **Chế độ Hiệu Năng — Hàng Đợi Nhiều Video (`ProcessingQueueManager`)**:
    - Lưu trữ bền vững trong `processing_queue.json`, tự động khôi phục danh sách khi mở lại ứng dụng.
    - Cho phép thêm hàng loạt video vào hàng đợi, theo dõi thanh tiến độ & bước xử lý của từng video.
-   - Hỗ trợ 3 chế độ vận hành:
-     - **Chỉ xử lý (`process_only`)**: Chạy tự động Tách sub $\rightarrow$ Dịch $\rightarrow$ Lồng tiếng rồi dừng ở trạng thái `Sẵn sàng xuất` để người dùng kiểm tra lại trước khi render.
-     - **Xử lý & Xuất luôn (`process_and_export`)**: Chạy trọn gói từ đầu đến khi ra file `.mp4` hoàn chỉnh.
-     - **Xuất các video đã chọn (`export_selected`)**: Render hàng loạt các video đã ở trạng thái `Sẵn sàng xuất`.
+   - Hỗ trợ 3 chế độ vận hành: **Chỉ xử lý (`process_only`)**, **Xử lý & Xuất luôn (`process_and_export`)**, và **Xuất các video đã chọn (`export_selected`)**.
    - Hỗ trợ **Dừng sau video hiện tại**, **Dừng khẩn cấp**, và **Dọn dữ liệu tạm của video (`Clean Video Data`)**.
 2. **Đóng gói & Di chuyển Dự án (`ProjectPackageService`)**:
    - Lưu/Mở dự án đang làm dở và đóng gói thành tệp nén di động bao gồm toàn bộ tài nguyên liên quan.
 3. **Công cụ Media FFmpeg 4-trong-1 (`MediaToolsModal`)**:
-   - **Tab 1 — Cắt Video (Trim)**: Cắt đoạn video theo mốc bắt đầu/kết thúc (chế độ Copy siêu tốc hoặc Re-encode chính xác từng frame).
-   - **Tab 2 — Ghép Video (Concat)**: Ghép nối nhiều video theo thứ tự tùy chọn.
-   - **Tab 3 — Tách Âm thanh / Hình ảnh (Demux)**: Tách riêng file âm thanh (`.wav`/`.mp3`) và/hoặc file hình ảnh không tiếng (`.mp4`).
-   - **Tab 4 — Ghép Nhạc vào Video (Mux)**: Thay thế âm thanh gốc bằng file âm thanh mới hoặc trộn chung hai luồng âm thanh.
+   - **Tab 1 — Cắt Video (Trim)**, **Tab 2 — Ghép Video (Concat)**, **Tab 3 — Tách Âm thanh / Hình ảnh (Demux)**, **Tab 4 — Ghép Nhạc vào Video (Mux)**.
 
 ---
 
-## 4. ĐẶC TẢ GIAO DIỆN NGƯỜI DÙNG TRÊN REACT + TAURI (BÁM SÁT `CapCap/app/ui/`)
+## 4. THIẾT KẾ GIAO DIỆN STUDIO HIỆN ĐẠI (PHONG CÁCH CAPCUT DESKTOP / DAVINCI RESOLVE)
 
-Giao diện được thiết kế theo phong cách Studio tối màu (Dark Mode), chia thành 5 vùng làm việc đồng bộ đúng với `CapCap`:
+> **Lưu ý quan trọng**: Không tham chiếu bố cục giao diện `CustomTkinter` của `CapCap`. Giao diện mới phải được thiết kế chuẩn **Modern NLE Video Editor** (như **CapCut Desktop**), sử dụng hệ màu Dark Studio (`#0E1015` nền chính, `#161922` bề mặt panel, `#1E2230` thẻ nổi, điểm nhấn màu Cyan/Teal `#00E5FF` kiểu CapCut), có vách ngăn kéo giãn kích thước (`Resizable Split Panes`) giữa các khu vực.
 
-1. **Thanh Công Cụ Đỉnh (`TopHeaderBar` — từ `CapCap/app/ui/header.py`)**:
-   - Nhập Video, Mở/Lưu Dự án, Xuất/Nhập Gói Dự Án.
-   - Công tắc chuyển bố cục thích ứng **9:16 (Dọc)** ↔ **16:9 (Ngang)**.
-   - Nút mở **Hàng Đợi Xử Lý Hàng Loạt (Performance Queue)**.
-   - Nút mở **Công Cụ Media (4 Tab FFmpeg)**.
-   - Nút mở **Cài Đặt Hệ Thống & Quản Lý Model AI / API Keys**.
-   - Hiển thị trạng thái phần cứng (GPU/VRAM) và tiến trình đang chạy.
+### Sơ đồ Bố cục 5 Khu vực Chuẩn CapCut Desktop:
 
-2. **Bảng Điều Khiển Quy Trình & Kiểu Chữ (`LeftControlPanel` — từ `CapCap/app/ui/left_panel.py` & `subtitle_style_tab.py`)**:
-   - Chia thành các tab trực quan:
-     - **Tab 1: Tạo & Dịch Phụ Đề** (Chọn nguồn ASR/OCR, tùy chọn làm sạch/phân vai, chọn Engine dịch, Preset thể loại, nút *Duyệt xưng hô*, chế độ hiển thị Đơn ngữ / Song ngữ / Không phụ đề).
-     - **Tab 2: Kiểu Dáng Phụ Đề (Style & Presets)** (Chuyển đổi chỉnh sửa giữa *Phụ đề 1 TS1* và *Phụ đề 2 TS2*, quản lý *My Presets*, chỉnh Font, Màu sắc, Viền, Nền, Vị trí, Highlight từ khóa).
-     - **Tab 3: Lồng Tiếng & Âm Thanh** (Chọn Engine TTS, lọc/tìm kiếm giọng đọc CapCut/ElevenLabs/Offline, gán giọng theo từng Speaker, bật *Fit Voice Time-Warp*, cắt khoảng lặng, chỉnh 3 thanh trượt âm lượng *Âm gốc / BGM / Giọng đọc*).
-     - **Tab 4: Xuất Bản** (Chọn độ phân giải/tỷ lệ khung hình, chất lượng nén, bật NVENC GPU, *Xuất MP4*, *Xuất Audio rời Voice/BGM/Mix*, *Xuất Tài nguyên*, *Xuất sang CapCut Draft*).
+```text
++--------------------------------------------------------------------------------------------------+
+| [Logo] [Dự án v] [Công cụ Media] [Hàng đợi Batch (3)]        [Tên Project] [GPU: CUDA] [XUẤT BẢN]|
++-------+------------------------------+-----------------------------------+-----------------------+
+| ICON  |   LEFT DRAWER (TÀI NGUYÊN    |      CENTER PLAYER & CANVAS       |   RIGHT INSPECTOR     |
+| RAIL  |     & BẢNG CÔNG CỤ AI)       |                                   |  (THUỘC TÍNH & PHỤ ĐỀ)|
+|       |                              |   +---------------------------+   |                       |
+| [Media|  (Nội dung thay đổi theo     |   |                           |   | [Phụ đề] [Kiểu chữ]   |
+| [Sub] |   Icon được chọn bên trái:   |   |     VIDEO PREVIEW         |   | [Video]  [Âm thanh]   |
+| [Dịch]|   - Kho Media & Nhạc nền     |   |   + Khung kéo/thả Layer   |   |                       |
+| [TTS] |   - Tạo phụ đề (ASR / OCR)   |   |   + Phụ đề TS1 / TS2      |   | - Danh sách câu TS1/2 |
+| [Chữ] |   - Dịch AI & Duyệt xưng hô  |   |   + 8 điểm neo Resize     |   | - Chỉnh Font/Màu/Viền |
+| [Lớp] |   - Lồng tiếng & Phân vai    |   +---------------------------+   | - Gán giọng Speaker   |
+| [Audio|   - Thư viện Lớp phủ & Mẫu)  |   [00:12.4 / 01:30.0] [|<][>][>|] | - Trộn 3 kênh Audio   |
+|       |                              |   [9:16 v] [Xem thử 5s] [Zoom v]  |                       |
++-------+------------------------------+-----------------------------------+-----------------------+
+| TIMELINE TOOLBAR: [Con trỏ V] [Cắt B] [Xoá] | [Đặt vùng I-O] [Alt:OCR] [Alt:Whisper] | [Zoom ---]|
++--------------+-----------------------------------------------------------------------------------+
+| TRACK HEADER |                       MULTI-TRACK TIMELINE (TOÀN CHIỀU NGANG)                     |
+| [M][L] Lớp   |  [=== Blur che sub gốc ===]          [=== Text biển hiệu ===]                     |
+| [M][L] Sub 2 |  [ Câu 1 (Bản gốc) ]  [ Câu 2 (Bản gốc) ]  [ Câu 3 (Bản gốc) ]                    |
+| [M][L] Sub 1 |  [ Câu 1 (Bản dịch)]  [ Câu 2 (Bản dịch)]  [ Câu 3 (Bản dịch)]                    |
+| [M][L] Video |  [================== Video Gốc + Nhãn Time-Warp (Slow/Freeze) ==================] |
+| [M][L] TTS   |  [ Waveform Câu 1  ]  [ Waveform Câu 2  ]  [ Waveform Câu 3  ]                    |
+| [M][L] BGM   |  [~~~~~~~~~~~~~~~~~~~~~~ Dạng sóng Nhạc nền / Âm gốc ~~~~~~~~~~~~~~~~~~~~~~~~~~~] |
++--------------+-----------------------------------------------------------------------------------+
+```
 
-3. **Khung Xem Trước Tương Tác (`InteractivePreviewCanvas` — từ `CapCap/app/ui/center_panel.py`)**:
-   - Trình phát video đồng bộ thời gian thực với âm thanh lồng tiếng, nhạc nền và phụ đề TS1/TS2.
-   - Cho phép **kéo-thả và co-giãn trực tiếp bằng chuột (Drag & 8-point Resize Handles)** ngay trên mặt khung hình video cho:
-     - Vị trí Phụ đề 1 (TS1) và Phụ đề 2 (TS2).
-     - Vùng quét OCR (`OCR Scan Region`).
-     - Các lớp phủ `Blur`, `Mask`, `Logo`, `Text`.
-   - **Thanh công cụ nhanh dưới màn hình Preview**:
-     - `[+ Chữ (T)]`, `[+ Logo]`, `[+ Làm mờ (Blur)]`, `[+ Khung che (Mask)]`, `[Quét & Dịch vùng OCR]`, `[Lật ngang]`, và nút **`Xem thử 5s (Fast Preview)`**.
+### Chi tiết thiết kế từng khu vực:
 
-4. **Bảng Biên Tập Phụ Đề (`SubtitleTablePanel` — từ `CapCap/app/ui/right_panel.py`)**:
-   - Chuyển đổi giữa **Phụ đề 1 (TS1)** và **Phụ đề 2 (TS2)**.
-   - Hiển thị danh sách câu phụ đề với đầy đủ công cụ trên từng dòng: chỉnh mốc `Start -> End`, chọn nhãn `Speaker`, chọn `Giọng đọc / Tốc độ riêng` cho câu đó, xem hệ số khớp thời lượng TTS, sửa văn bản gốc & bản dịch, nút `Nghe thử câu`, `Tạo lại TTS câu`, `Quét lại OCR câu`, `Thêm/Gộp/Tách/Xóa dòng`.
-   - Thanh công cụ phía trên bảng: Tìm kiếm & Thay thế, Dịch chuyển thời gian hàng loạt, Xuất/Nhập `.srt`/`.ass`, và nút **Khôi phục thời gian gốc (`Restore Original Timing`)**.
+#### 4.1. Thanh Top Header Bar (Kiểu CapCut Desktop)
+- **Góc trái**: Biểu tượng ứng dụng, menu **Dự án** (`Tạo mới`, `Mở dự án`, `Lưu dự án`, `Đóng gói dự án di động .zip`, `Nhập gói dự án`), nút mở nhanh **Công cụ Media (4-trong-1)** và nút **Hàng đợi xử lý hàng loạt (Batch Queue)** có badge đếm số video đang chạy.
+- **Chính giữa**: Tên dự án (click để đổi tên trực tiếp), chỉ báo tự động lưu (`Đã lưu`).
+- **Góc phải**: Badge phần cứng (`CUDA · RTX ...` hoặc `CPU`), nút mở **Cài đặt & Quản lý Model AI**, và nút **Xuất bản (Export)** nổi bật màu Cyan mở hộp thoại Xuất đa năng (giống hộp thoại Export của CapCut Desktop: cho phép chọn xuất Video MP4, chỉ xuất Âm thanh Voice/BGM/Mix, xuất Phụ đề SRT/ASS, xuất Tài nguyên rời, hoặc **Đẩy thẳng sang CapCut Desktop Draft**).
 
-5. **Timeline Đa Tầng (`MultiTrackTimeline` — từ `CapCap/app/ui/bottom_panel.py` & `timeline.py`)**:
-   - Thước thời gian hỗ trợ Zoom, bám theo Playhead, kéo chọn vùng (`Selection Range`).
-   - Khi kéo chọn một vùng trên Timeline, hiển thị thanh tác vụ nổi: **`Alt: Quét lại bằng OCR`**, **`Alt: Tách lại bằng Whisper`**, **`Xóa phụ đề trong vùng`**.
-   - Hiển thị đầy đủ các làn (lanes) độc lập, cho phép kéo biên trái/phải để thay đổi trực tiếp thời gian bắt đầu/kết thúc:
-     - `Video / Time-Warp`
-     - `Phụ đề 1 (TS1)`
-     - `Phụ đề 2 (TS2)`
-     - `Lồng tiếng (TTS)`
-     - `Nhạc nền (BGM)`
-     - `Hiệu ứng lớp phủ (Blur / Mask / Logo / Text)`
+#### 4.2. Cột Trái: Navigation Icon Rail + Tool Drawer (`LeftDock`)
+Thay vì nhồi nhét mọi thứ vào một cột dài rối mắt, sử dụng thanh **Icon Rail dọc** (rộng `56px`) kết hợp ngăn **Tool Drawer** (`300px – 360px`, có thể thu gọn):
+1. **Tab `Media`**: Nhập video nguồn, nhập file nhạc nền BGM ngoài, nhập file `.srt` có sẵn, quản lý tài nguyên trong dự án.
+2. **Tab `Phụ đề AI (Captions)`**:
+   - Chọn phương thức tách: **Nhận dạng giọng nói (`Whisper` / `SenseVoice` / `CapCut`)** hoặc **Quét phụ đề cứng (`OCR`)**.
+   - Các tùy chọn thông minh: `Tách giọng sạch trước khi nghe`, `Gộp câu trùng lặp (Dedup)`, `Lọc ảo giác khoảng lặng`, `Phân vai người nói (Speaker Diarization)`, `Bù đoạn trống bằng OCR`.
+3. **Tab `Dịch thuật AI (Translate)`**:
+   - Chọn ngôn ngữ đích, Engine dịch (`Local GGUF`, `Gemini`, `DeepSeek`, `OpenAI`, `Ollama`, `Google`, `Bing`, `Browser Bridge`).
+   - Chọn **Preset Thể loại phim** (hiển thị dạng thẻ trực quan: *Tiên hiệp*, *Ngôn tình*, *Short Drama*, *Anime*, *K-Drama*...).
+   - Nút **Phân tích & Duyệt Xưng Hô Nhân Vật** (mở Modal ma trận nhân vật & đại từ xưng hô).
+   - Công tắc chế độ phụ đề: `Đơn ngữ (TS1)` / `Song ngữ (TS1 + TS2)` / `Tắt phụ đề`.
+4. **Tab `Lồng tiếng (TTS & Voice)`**:
+   - Thư viện giọng đọc trực quan (tìm kiếm, lọc Nam/Nữ/Trẻ em/Review phim từ `Voice.json`, `ElevenLabs`, `VieNeu`, `Piper`, `Edge`, `OmniVoice`), có nút nghe thử từng giọng.
+   - Bảng **Phân vai giọng đọc theo Nhân vật (`SPEAKER_00`, `SPEAKER_01`...)**.
+   - Tùy chọn **Fit Voice (Time-Warp: Tự động làm chậm/giữ khung hình video khớp độ dài câu đọc)** và **Cắt khoảng lặng đầu/cuối (`-60dB`)**.
+5. **Tab `Lớp phủ & Hiệu ứng (Layers & Stickers)`**:
+   - Thêm nhanh các lớp: **Làm mờ phụ đề gốc (`Blur`)**, **Khung che (`Mask`)**, **Chữ tiêu đề (`Text`)**, **Chèn ảnh (`Logo`)**, hoặc công cụ **Quét & Dịch vùng ảnh (`OCR Translator`)**.
+
+#### 4.3. Khu vực Giữa: Trình phát Video & Màn hình Canvas Tương tác (`CenterPlayerCanvas`)
+- **Interactive Stage**:
+  - Video hiển thị giữa bàn dựng tối màu, hỗ trợ chuyển đổi tỷ lệ khung hình (`9:16`, `16:9`, `1:1`, `Gốc`) ngay dưới góc khung phát.
+  - **Thao tác trực tiếp trên màn hình (On-Canvas Manipulation)**:
+    - Click vào Phụ đề TS1, Phụ đề TS2, Lớp làm mờ (`Blur`), Khung che (`Mask`), `Logo`, `Text` hoặc `Vùng quét OCR` sẽ hiện khung **Bounding Box màu Cyan với 8 điểm neo kéo giãn (Resize Handles)** và đường gióng căn giữa tự động (`Smart Alignment Guides` dọc/ngang như CapCut).
+- **Thanh điều khiển phát (Transport Bar)**:
+  - Đồng hồ Timecode chuẩn `MM:SS.ms`, nút Play/Pause (`Space`), lùi/tiến 1 frame (`←`/`→`), lùi/tiến 1 câu phụ đề, nút **Lật ngang video (`Flip Horizontal`)**, nút bật/tắt nhanh lớp phủ, và nút **Xem thử 5s (`Fast Preview 5s`)** để kiểm tra kết quả render thực tế ngay lập tức.
+
+#### 4.4. Cột Phải: Bảng Thuộc Tính Ngữ Cảnh & Biên Tập Phụ Đề (`RightInspector`)
+Hoạt động giống hệt **Inspector Panel** của CapCut Desktop, gồm 2 chế độ hoặc chia tab thông minh:
+1. **Tab `Biên tập Phụ đề (Subtitles List)`**:
+   - Thanh chuyển đổi nhanh **Track Phụ đề 1 (TS1)** / **Track Phụ đề 2 (TS2)** / **Xem Song Song**.
+   - Thanh công cụ nhanh: Tìm kiếm & Thay thế từ, Dịch chuyển thời gian (`Shift Timing`), **Khôi phục thời gian gốc (`Restore Timing`)**, Xuất nhanh `.srt`/`.ass`.
+   - Danh sách các thẻ câu thoại (Cue Cards):
+     - Chỉnh sửa trực tiếp `Start -> End`, gán nhãn `Speaker` (có màu riêng), chọn giọng đọc & tốc độ riêng cho câu đó.
+     - Ô nhập câu gốc và câu dịch êm mượt, tự động cuộn theo vị trí Playhead.
+     - Cụm nút thao tác nhanh trên từng câu: `Nghe câu này`, `Tạo lại TTS riêng câu này`, `Quét lại OCR khung hình câu này`, `Chia đôi câu tại con trỏ`, `Gộp với câu dưới`, `Xóa`.
+2. **Tab `Kiểu chữ & Mẫu (Text Style & Presets)`** (hiển thị khi chọn Phụ đề hoặc Text Layer):
+   - Bộ chọn chỉnh sửa cho `TS1` hoặc `TS2`.
+   - Kho **My Presets** (hiển thị dạng các ô chữ mẫu trực quan như CapCut, cho phép Lưu / Đổi tên / Xóa mẫu cá nhân).
+   - Chỉnh chi tiết: Phông chữ, Cỡ chữ, Màu chữ, Viền chữ (Stroke), Bóng đổ (Shadow), Hộp nền (Background Box + Độ bo góc + Độ mờ), Vị trí căn lề 9 điểm, và hiệu ứng **Highlight từ khóa (Đổi màu / Phóng to từ nhấn mạnh)**.
+3. **Tab `Video & Âm thanh (Video & Audio Mixer)`** (hiển thị khi chọn track Video/Audio):
+   - **Bộ trộn 3 kênh âm thanh (3-Track Mixer)**: Thanh trượt âm lượng độc lập cho `Âm thanh gốc`, `Nhạc nền BGM ngoài`, `Giọng đọc lồng tiếng TTS`, kèm nút `Tách nhạc nền (Vocal Isolation)` và độ nén `Sidechain Ducking`.
+   - Thuộc tính lớp phủ (`Blur` intensity, `Feather`, `Mask` opacity, tọa độ `X/Y/W/H`).
+
+#### 4.5. Khu vực Dưới: Timeline Đa Tầng Chuyên Nghiệp (`BottomMultiTrackTimeline`)
+Trải rộng 100% chiều ngang màn hình dưới cùng giống hệt CapCut Desktop:
+- **Thanh Công cụ Timeline (Timeline Toolbar)**:
+  - Công cụ Chọn (`V`), Cắt/Chia đôi tại Playhead (`B` / `Ctrl+B`), Xóa (`Delete`), Undo/Redo.
+  - Công cụ **Đặt vùng chọn (`In [` / `Out ]`)**: Khi có một khoảng thời gian được bôi chọn trên Timeline, hiển thị cụm nút nổi:
+    - **`Alt: Quét lại vùng này bằng OCR`**
+    - **`Alt: Nhận dạng lại vùng này bằng Whisper`**
+    - **`Xóa các câu trong vùng chọn`**
+  - Công tắc **Bật/Tắt từ tính (`Snapping`)**, **Tự động cuộn theo Playhead**, nút **Thu phóng vừa khít (`Fit Timeline`)** và thanh trượt **Zoom (`px/s`)**.
+- **Cột Đầu Track (`Track Headers`) & Các Làn Dữ Liệu (`Timeline Lanes`)**:
+  - Mỗi track có nút `Ẩn/Hiện (Eye)`, `Tắt tiếng (Mute)`, `Khóa (Lock)`:
+    1. **Track Hiệu ứng / Lớp phủ (`Overlays`)**: Các khối `Blur`, `Mask`, `Logo`, `Text` (kéo hai đầu để chỉnh thời điểm bắt đầu/kết thúc).
+    2. **Track Phụ đề 2 (`TS2 - Phụ đề phụ`)**: Các khối câu phụ đề phụ song ngữ.
+    3. **Track Phụ đề 1 (`TS1 - Phụ đề chính`)**: Các khối câu phụ đề chính (kéo trực tiếp mép trái/phải để tinh chỉnh timing, tự động bắt dính vào câu kế tiếp).
+    4. **Track Video chính (`Main Video & Time-Warp`)**: Hiển thị dải ảnh thu nhỏ (filmstrip) và đánh dấu trực quan các đoạn đang được giãn chậm (`Slow`) hoặc dừng hình (`Freeze`) bởi thuật toán Fit Voice.
+    5. **Track Lồng tiếng (`TTS Voice`)**: Hiển thị từng khối âm thanh thoại kèm biểu đồ sóng âm (`Waveform`), đổi màu cảnh báo vàng/đỏ nếu câu thoại bị tràn thời lượng.
+    6. **Track Nhạc nền (`BGM & Original Audio`)**: Hiển thị biểu đồ sóng âm của nhạc nền và đường bao âm lượng (volume envelope).
 
 ---
 
@@ -261,7 +312,7 @@ capcap-studio/
 │   │   ├── engines/                    # Các bộ xử lý cốt lõi chuyển đổi 1:1 từ CapCap
 │   │   │   ├── whisper_engine.py       # Faster-Whisper + VAD + Hallucination filter + Dedup
 │   │   │   ├── sensevoice_engine.py    # SenseVoice ONNX + Smart token splitting
-│   │   │   ├── ocr_engine.py           # Rawvideo pipe + XOR mask dedup + RapidOCR/WinOCR + CJK radical fix
+│   │   │   ├── ocr_engine.py           # Rawvideo pipe + Mask dedup + RapidOCR/WinOCR + CJK radical fix
 │   │   │   ├── diarization_engine.py   # Sherpa-ONNX Speaker Diarization
 │   │   │   ├── capcut_engine.py        # CapCut Web & PC (sscronet.dll worker) STT/TTS + Voice.json
 │   │   │   ├── elevenlabs_engine.py    # ElevenLabs TTS + Quota/Voice list
@@ -286,16 +337,15 @@ capcap-studio/
 ├── frontend/
 │   ├── src/
 │   │   ├── types/                      # Định nghĩa TypeScript đồng bộ 1:1 với Backend schemas
-│   │   ├── store/                      # Zustand store quản lý toàn bộ trạng thái ứng dụng
+│   │   ├── store/                      # Zustand store (Project, Timeline Tracks, Selection, Undo/Redo)
 │   │   ├── services/                   # HTTP API client & WebSocket listener
 │   │   └── components/
-│   │       ├── layout/                 # TopHeaderBar, Adaptive 9:16 & 16:9 Workspace
-│   │       ├── pipeline/               # Các bảng điều khiển ASR, Dịch, TTS, Mix & Xuất bản
-│   │       ├── style/                  # SubtitleStyleTab (TS1/TS2, My Presets, Highlight)
-│   │       ├── preview/                # InteractivePreviewCanvas (Drag/Resize Layers, Fast Preview 5s)
-│   │       ├── subtitles/              # SubtitleTablePanel (TS1/TS2, Speaker, Per-line TTS, Restore Timing)
-│   │       ├── timeline/               # MultiTrackTimeline (9 lanes + Range Selection Alt OCR/Whisper)
-│   │       └── modals/                 # PronounReviewDialog, QueueModal, MediaToolsModal, SettingsModal
+│   │       ├── layout/                 # TopHeaderBar, Resizable Split Workspace
+│   │       ├── dock/                   # LeftIconRail + drawers (Media, ASR/OCR, Translate, TTS, Layers)
+│   │       ├── player/                 # CenterPlayerCanvas (Interactive Bounding Box, Snapping Guides)
+│   │       ├── inspector/              # RightInspector (Subtitle List TS1/TS2, Text Style, Audio Mixer)
+│   │       ├── timeline/               # BottomMultiTrackTimeline (6+ tracks, Waveform, Range Actions)
+│   │       └── modals/                 # ExportModal, PronounReviewModal, BatchQueueModal, MediaToolsModal
 │   └── src-tauri/                      # Cấu hình Tauri v2 Desktop
 └── resources/
     ├── capcut/Voice.json               # Danh mục giọng đọc CapCut từ CapCap
@@ -305,8 +355,9 @@ capcap-studio/
 ---
 
 ## 6. TIÊU CHÍ NGHIỆM THU (ACCEPTANCE CRITERIA)
-1. **Đầy đủ 100% tính năng của `CapCap` (v9.0.1)**: Không thiếu bất kỳ công tắc, chế độ, hộp thoại hay luồng xử lý nào so với bản gốc `CapCap`.
-2. **Tốc độ OCR & ASR tối ưu**: Chạy trực tiếp trên GPU CUDA (cả Whisper và RapidOCR) không cần cấu hình thủ công biến môi trường PATH; tốc độ tách phụ đề cứng đạt mức tối đa nhờ FFmpeg rawvideo pipe + mask deduplication.
-3. **Kiểm thử tự động**:
+1. **Đầy đủ 100% tính năng nghiệp vụ của `CapCap` (v9.0.1)**: Không thiếu bất kỳ thuật toán, chế độ xử lý hay công cụ nào so với bản gốc `CapCap`.
+2. **Trải nghiệm giao diện chuẩn Studio chuyên nghiệp (như CapCut Desktop)**: Bố cục rõ ràng, hiện đại, có thanh công cụ bên trái theo ngữ cảnh (`Icon Rail + Drawer`), màn hình Canvas kéo-thả/co-giãn trực tiếp ở giữa, bảng thuộc tính `Inspector` bên phải và `Multi-Track Timeline` mượt mà ở phía dưới.
+3. **Tốc độ OCR & ASR tối ưu**: Chạy trực tiếp trên GPU CUDA (cả Whisper và RapidOCR) không cần cấu hình thủ công biến môi trường PATH; tốc độ tách phụ đề cứng đạt mức tối đa nhờ FFmpeg rawvideo pipe + mask deduplication.
+4. **Kiểm thử tự động**:
    - Toàn bộ unit test và integration test phía Backend (`pytest`) đạt 100% PASS.
    - Toàn bộ mã nguồn Frontend biên dịch sạch sẽ (`tsc --noEmit && vite build`) với 0 lỗi.
