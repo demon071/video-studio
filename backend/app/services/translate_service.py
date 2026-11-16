@@ -20,12 +20,13 @@ import logging
 import re
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.config import Settings, api_key, get_settings
+from app.config import BASE_DIR, Settings, api_key, get_settings
 from app.core import hardware
 from app.core.progress import NULL_REPORTER, Cancelled, Reporter
 from app.schemas.subtitle import SubtitleSegment
@@ -170,11 +171,143 @@ _STYLE_PRESETS: dict[str, str] = {
 }
 
 
-def _style_rules(target: str, style: str) -> str:
+def _prompts_dir() -> Path:
+    candidates = [
+        BASE_DIR.parent / "resources" / "prompts",
+        BASE_DIR / "resources" / "prompts",
+    ]
+    return next((p for p in candidates if p.is_dir()), candidates[0])
+
+
+def list_presets() -> list[dict[str, Any]]:
+    """Return CapCap's genre translation presets from ``resources/prompts/translation_prompt_presets.json``."""
+    catalog = _prompts_dir() / "translation_prompt_presets.json"
+    if not catalog.is_file():
+        return []
+    try:
+        data = json.loads(catalog.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def load_preset_rules(preset_id: str | None) -> str:
+    """Extract naming, honorific, and address guidelines from a CapCap genre preset markdown file."""
+    if not preset_id or preset_id == "general_default":
+        return ""
+    presets = list_presets()
+    entry = next((item for item in presets if item.get("id") == preset_id), None)
+    if not entry:
+        return ""
+    preset_path = _prompts_dir() / "presets" / str(entry.get("file") or "")
+    if not preset_path.is_file():
+        return ""
+    try:
+        content = preset_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    rule_lines: list[str] = []
+    in_rules = False
+    for line in content.splitlines():
+        if line.startswith("### "):
+            in_rules = True
+        if in_rules:
+            if line.strip().startswith("Never merge, omit"):
+                break
+            rule_lines.append(line)
+    return "\n".join(rule_lines).strip()
+
+
+class RollingContextLedger:
+    """Sequential batch pronoun & relationship ledger (ported from CapCap context_analyzer.py)."""
+
+    def __init__(self, base_context: str = "") -> None:
+        self.base_context: str = str(base_context or "").strip()
+        self.confirmed_rules: list[str] = []
+        self._seen_signatures: set[str] = set()
+
+    def add_confirmed_rule(self, rule: str) -> None:
+        clean = str(rule or "").strip()
+        if not clean:
+            return
+        sig = clean.lower()
+        if sig not in self._seen_signatures:
+            self._seen_signatures.add(sig)
+            self.confirmed_rules.append(clean)
+
+
+def update_ledger_from_batch(
+    ledger: RollingContextLedger,
+    source_batch: list[str],
+    translated_batch: list[str],
+) -> None:
+    """Extract and reinforce confirmed relationship and pronoun rules after a batch (ported from CapCap)."""
+    if not source_batch or not translated_batch:
+        return
+    combined_src = " ".join(source_batch)
+    combined_trn = " ".join(translated_batch)
+    trn_lower = combined_trn.lower()
+
+    if "学长" in combined_src and ("anh" in trn_lower or "học trưởng" in trn_lower):
+        ledger.add_confirmed_rule("学长 (Học trưởng / Upperclassman) -> Xưng hô bắt buộc: 'anh' - 'em'")
+    if "学姐" in combined_src and ("chị" in trn_lower or "học tỷ" in trn_lower):
+        ledger.add_confirmed_rule("学姐 (Học tỷ / Senior female) -> Xưng hô bắt buộc: 'chị' - 'em'")
+    if "学妹" in combined_src or "学弟" in combined_src:
+        ledger.add_confirmed_rule("学妹 / 学弟 (Đàn em / Junior) -> Xưng hô bắt buộc: 'em'")
+
+    has_aggressive_src = any(
+        k in combined_src
+        for k in ("找死", "老子", "混蛋", "滚开", "放开", "狗东西", "给脸不要脸", "你等着", "这玩意", "问你了吗", "现男友")
+    )
+    has_aggressive_trn = "mày" in trn_lower or "tao" in trn_lower or "cô cứ đợi đấy" in trn_lower
+    if has_aggressive_src or has_aggressive_trn:
+        ledger.add_confirmed_rule(
+            "Antagonist / Confrontation -> Xưng hô đối kháng: 'mày - tao' hoặc 'cô/hắn - tôi'. Tuyệt đối cấm xưng 'em'."
+        )
+
+    if ("哥们" in combined_src or "兄弟" in combined_src) and any(
+        w in trn_lower for w in ("cô nương", "em gái", "bạn à", "cô em")
+    ):
+        ledger.add_confirmed_rule(
+            "哥们 / 兄弟 (hướng về nữ hoặc trêu đùa) -> Xưng hô: 'cô nương' / 'em gái' / 'bạn'"
+        )
+
+    if ("老板" in combined_src or "总" in combined_src) and ("sếp" in trn_lower or "giám đốc" in trn_lower):
+        ledger.add_confirmed_rule("老板 / ...总 (Lãnh đạo / Sếp) -> Xưng hô bắt buộc: 'sếp' / 'giám đốc'")
+
+    distinctive = ("em", "tao", "mày", "con", "cháu")
+    counts = Counter(w for w in trn_lower.split() if w in distinctive)
+    dominant = counts.most_common(1)
+    if dominant and dominant[0][1] >= 3:
+        pronoun, count = dominant[0]
+        ledger.add_confirmed_rule(
+            f"Batch pronoun pattern: nhân vật xưng '{pronoun}' ({count} lần) — duy trì nhất quán ở các đoạn tiếp theo."
+        )
+
+
+def build_rolling_context_guidance(ledger: RollingContextLedger) -> str:
+    sections: list[str] = []
+    if ledger.base_context:
+        sections.append(ledger.base_context)
+    if ledger.confirmed_rules:
+        rules_text = "\n".join(f"- {r}" for r in ledger.confirmed_rules)
+        sections.append(
+            "### Confirmed Address Memory from Preceding Batches (Xưng hô đã xác lập):\n"
+            f"{rules_text}\n"
+            "CRITICAL: Maintain strict pronoun continuity with these established character address forms."
+        )
+    return "\n\n".join(sections).strip()
+
+
+def _style_rules(target: str, style: str, preset: str | None = None) -> str:
     """Extra system rules for the target language and the requested genre."""
     rules: list[str] = []
     if _language_name(target) == "Vietnamese":
         rules.append(_VIETNAMESE_RULES)
+        if preset:
+            preset_rules = load_preset_rules(preset)
+            if preset_rules:
+                rules.append(preset_rules)
     lowered = (style or "").lower()
     for key, markers in _STYLE_MARKERS.items():
         if any(marker in lowered for marker in markers):
@@ -183,7 +316,15 @@ def _style_rules(target: str, style: str) -> str:
     return "\n".join(rules)
 
 
-def _system_prompt(target: str, source: str = "auto", style: str = "") -> str:
+def _system_prompt(
+    target: str,
+    source: str = "auto",
+    style: str = "",
+    *,
+    preset: str | None = None,
+    context_guidance: str = "",
+    custom_prompt: str | None = None,
+) -> str:
     # ``str.replace`` and not ``str.format``: rule 6 is full of JSON braces.
     base = SYSTEM_PROMPT.replace("{target}", _language_name(target))
     # Naming the source stops the 3B model from occasionally *answering* a
@@ -200,8 +341,13 @@ def _system_prompt(target: str, source: str = "auto", style: str = "") -> str:
             f"{base}\nWrite {target_name} letters only: no Chinese, Japanese or Korean "
             "characters anywhere, including inside a name."
         )
-    rules = _style_rules(target, style)
-    return f"{base}\n{rules}" if rules else base
+    rules = _style_rules(target, style, preset=preset)
+    prompt = f"{base}\n{rules}" if rules else base
+    if custom_prompt and custom_prompt.strip():
+        prompt = f"{prompt}\n\n### Custom Translation Instructions:\n{custom_prompt.strip()}"
+    if context_guidance and context_guidance.strip():
+        prompt = f"{prompt}\n\n{context_guidance.strip()}"
+    return prompt
 
 
 
@@ -733,10 +879,56 @@ def _ask_openai(prompt: str, settings: Settings, system: str) -> str:
     return response.choices[0].message.content or ""
 
 
+def _ask_deepseek(prompt: str, settings: Settings, system: str) -> str:
+    key = api_key("deepseek", settings) or settings.deepseek_api_key
+    if not key:
+        raise TranslateError("DEEPSEEK_API_KEY is not configured")
+    try:
+        from openai import OpenAI  # noqa: PLC0415
+    except ImportError as exc:
+        raise TranslateError("openai is not installed (pip install openai)") from exc
+
+    client = OpenAI(api_key=key, base_url=settings.deepseek_base_url or "https://api.deepseek.com/v1")
+    response = client.chat.completions.create(
+        model=settings.deepseek_chat_model or "deepseek-chat",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        response_format={"type": "json_object"},
+    )
+    if not response.choices:
+        raise TranslateError("DeepSeek returned no choices")
+    return response.choices[0].message.content or ""
+
+
+def _ask_ollama(prompt: str, settings: Settings, system: str) -> str:
+    try:
+        from openai import OpenAI  # noqa: PLC0415
+    except ImportError as exc:
+        raise TranslateError("openai is not installed (pip install openai)") from exc
+
+    client = OpenAI(api_key="ollama", base_url=settings.ollama_base_url or "http://127.0.0.1:11434/v1")
+    response = client.chat.completions.create(
+        model=settings.ollama_chat_model or "qwen2.5:7b",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+    if not response.choices:
+        raise TranslateError("Ollama returned no choices")
+    return response.choices[0].message.content or ""
+
+
 _ASKERS = {
     "local": _ask_local,
     "gemini": _ask_gemini,
     "openai": _ask_openai,
+    "deepseek": _ask_deepseek,
+    "ollama": _ask_ollama,
 }
 
 # Sleep in slices so a cancel during a 4 s wait is felt in half a second, not
@@ -973,7 +1165,21 @@ def _translate_web(
             )
         except web_translate.WebTranslateError as exc:
             log.warning("%s batch %s failed: %s", provider, position, exc)
-            answers = []
+            if provider == "google":
+                # CapCap automatic fallback: when Google Translate hits HTTP 429
+                # or fails, fall back to Bing Translate so the batch keeps going.
+                try:
+                    answers = web_translate.translate_texts(
+                        [segment.text for segment in batch],
+                        provider="bing",
+                        source=source_language,
+                        target=target_language,
+                    )
+                    log.info("Google Translate failed on batch %s; recovered via Bing fallback", position)
+                except web_translate.WebTranslateError:
+                    answers = []
+            else:
+                answers = []
 
         if len(answers) != len(batch):
             failed += 1
@@ -1018,6 +1224,94 @@ def _translate_web(
     return TranslationOutcome(provider=provider, model=model_name, segments=translated, failed_chunks=failed)
 
 
+def analyze_dialogue_context(
+    segments: list[SubtitleSegment],
+    *,
+    source_language: str = "auto",
+    target_language: str = "vi",
+    provider: str | None = None,
+    user_guidance: str = "",
+    existing_context: str = "",
+    max_cues: int = 300,
+    settings: Settings | None = None,
+) -> tuple[str, str, str, int]:
+    """Extract character profiles and strict two-way address rules (ported from CapCap).
+
+    Returns ``(context_text, provider_name, model_name, sampled_count)``.
+    """
+    settings = provider_config.overlay(settings or get_settings())
+    if not segments:
+        return "", "none", "", 0
+
+    chosen = (provider or settings.translate_provider or "local").lower()
+    if chosen in _WEB_PROVIDERS or chosen not in _ASKERS:
+        chosen = "gemini" if api_key("gemini", settings) else "local"
+
+    model_name = {
+        "local": settings.llm_model_file,
+        "gemini": settings.gemini_model,
+        "openai": settings.openai_chat_model,
+        "deepseek": settings.deepseek_chat_model,
+        "ollama": settings.ollama_chat_model,
+    }.get(chosen, settings.llm_model_file)
+
+    sample = segments if len(segments) <= max_cues else segments[:200]
+    lines: list[str] = []
+    has_speaker = False
+    for idx, seg in enumerate(sample, 1):
+        txt = (seg.text or "").strip()
+        spk = (seg.speaker or "").strip()
+        if spk:
+            has_speaker = True
+            lines.append(f"{idx}. [{spk}]: {txt}")
+        else:
+            lines.append(f"{idx}. {txt}")
+
+    speaker_clause = (
+        "Cues contain speaker tags like [SPEAKER_00]. Analyze deeply to identify all distinct characters.\n"
+        if has_speaker
+        else "Identify all interacting characters, their genders, and social roles from dialogue cues.\n"
+    )
+    feedback_clause = ""
+    if existing_context.strip():
+        feedback_clause += f'\nPREVIOUS DRAFT OF CHARACTER PROFILES (TO BE REVISED):\n"""\n{existing_context.strip()}\n"""\n'
+    if user_guidance.strip():
+        feedback_clause += (
+            f"\nCRITICAL USER CORRECTIONS & GUIDANCE (HIGHEST PRIORITY):\n"
+            f'The user reviewed the character profiles and instructed: "{user_guidance.strip()}"\n'
+            "- Strictly follow the user's guidance and swap/update roles, genders, and address pairs as instructed.\n"
+        )
+
+    system_prompt = (
+        f"You are an expert dialogue and script analyzer.\n"
+        f"Analyze these {source_language}->{target_language} subtitle cues to extract a durable Character Profile "
+        f"and strict Two-Way Address Rules (quy tắc xưng hô 2 chiều) to ensure 100% address consistency.\n\n"
+        f"{speaker_clause}{feedback_clause}\n"
+        "Extract:\n"
+        "1. CHARACTERS & ROLES: Name/Title (standard Hán-Việt for Chinese names), Gender (Nam/Nữ), and social role.\n"
+        "2. TWO-WAY ADDRESS RULES (Quy tắc xưng hô 2 chiều):\n"
+        "   - Character A addresses B as (gọi) and refers to self as (xưng)\n"
+        "   - Character B addresses A as (gọi) and refers to self as (xưng)\n"
+        "   - Specify exact pairs: anh - em, chị - em, mày - tao, tôi - anh/cô, sếp - em...\n"
+        'Answer with STRICT JSON only: {"t": "### Hồ sơ nhân vật & Quy tắc xưng hô bắt buộc:\\n..."}'
+    )
+    user_prompt = "\n".join(lines)
+
+    try:
+        if chosen == "local":
+            if model_manager.llm_path(settings) is None:
+                raise _not_installed(settings)
+            raw = _complete_local(user_prompt, settings, system_prompt, schema=_SHORTEN_SCHEMA, max_tokens=600)
+        else:
+            raw = _ASKERS[chosen](user_prompt, settings, system_prompt)
+        parsed = _parse_shortened(raw) or raw.strip()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("dialogue context analysis failed (%s)", exc)
+        raise TranslateError(f"Context analysis failed: {exc}") from exc
+
+    return parsed.strip(), chosen, model_name, len(sample)
+
+
 def translate(
     segments: list[SubtitleSegment],
     *,
@@ -1025,6 +1319,10 @@ def translate(
     source_language: str = "auto",
     provider: str | None = None,
     style: str = "short-form video subtitle",
+    preset: str | None = None,
+    custom_prompt: str | None = None,
+    auto_context: bool = False,
+    context_guidance: str | None = None,
     report: Reporter = NULL_REPORTER,
     settings: Settings | None = None,
 ) -> TranslationOutcome:
@@ -1049,6 +1347,8 @@ def translate(
         "local": settings.llm_model_file,
         "gemini": settings.gemini_model,
         "openai": settings.openai_chat_model,
+        "deepseek": settings.deepseek_chat_model,
+        "ollama": settings.ollama_chat_model,
     }[chosen]
 
     # Fail once, up-front, when the weights are missing: retrying 2x per batch
@@ -1067,12 +1367,27 @@ def translate(
     if profile is not None:
         ask = _paced(ask, _Pacer(profile.pause, report))
 
+    initial_context = (context_guidance or "").strip()
+    if auto_context and not initial_context:
+        try:
+            report(stage="context", fraction=0.0, message="đang phân tích ngữ cảnh & quy tắc xưng hô")
+            initial_context, _, _, _ = analyze_dialogue_context(
+                segments,
+                source_language=source_language,
+                target_language=target_language,
+                provider=chosen,
+                settings=settings,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auto context analysis skipped (%s)", exc)
+
+    ledger = RollingContextLedger(base_context=initial_context)
+
     chunks = _chunk(
         segments,
         max_lines=profile.lines if profile else MAX_LINES_PER_CHUNK,
         max_chars=profile.chars if profile else MAX_CHARS_PER_CHUNK,
     )
-    system = _system_prompt(target_language, source_language, style)
     translated: list[SubtitleSegment] = []
     failed_chunks = 0
 
@@ -1084,6 +1399,15 @@ def translate(
     for position, chunk in enumerate(chunks, start=1):
         if position > 1:
             report(emit=True)  # cheap cancellation checkpoint
+        rolling_guidance = build_rolling_context_guidance(ledger)
+        system = _system_prompt(
+            target_language,
+            source_language,
+            style,
+            preset=preset,
+            context_guidance=rolling_guidance,
+            custom_prompt=custom_prompt,
+        )
         mapping = _translate_chunk(
             chunk,
             ask=ask,
@@ -1105,10 +1429,15 @@ def translate(
             continue
 
         kept = [segment.index for segment in chunk if segment.index not in mapping]
+        batch_src: list[str] = []
+        batch_trn: list[str] = []
         for segment in chunk:
             copy = segment.model_copy()
             copy.translation = mapping.get(segment.index) or segment.text
             translated.append(copy)
+            batch_src.append(segment.text)
+            batch_trn.append(copy.translation or "")
+        update_ledger_from_batch(ledger, batch_src, batch_trn)
         if kept:
             report(
                 stage="translate",
@@ -1216,4 +1545,16 @@ def shorten_for_timing(
     return candidate if 0 < len(candidate) < len(text) else text
 
 
-__all__ = ["TranslateError", "TranslationOutcome", "shorten_for_timing", "translate", "unload"]
+__all__ = [
+    "RollingContextLedger",
+    "TranslateError",
+    "TranslationOutcome",
+    "analyze_dialogue_context",
+    "build_rolling_context_guidance",
+    "list_presets",
+    "load_preset_rules",
+    "shorten_for_timing",
+    "translate",
+    "unload",
+    "update_ledger_from_batch",
+]

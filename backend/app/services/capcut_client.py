@@ -37,8 +37,9 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import httpx
 
-from app.config import Settings, get_settings, resolve_ffmpeg
+from app.config import BASE_DIR, Settings, get_settings, resolve_ffmpeg
 from app.core.progress import NULL_REPORTER, Reporter
+from app.services import capcut_pc_worker
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +85,52 @@ CAPCUT_VOICES: dict[str, tuple[str, str]] = {
     "BV560_streaming": ("Alex Đại Đế", "7483736167565758992"),
 }
 DEFAULT_TTS_VOICE = "BV421_vivn_streaming"
+_VOICE_CATALOG_CACHE: list[dict[str, Any]] | None = None
+
+
+def list_capcut_voices() -> list[dict[str, Any]]:
+    """Load the full CapCut voice catalog from ``resources/capcut/Voice.json`` (ported from CapCap)."""
+    global _VOICE_CATALOG_CACHE
+    if _VOICE_CATALOG_CACHE is not None:
+        return _VOICE_CATALOG_CACHE
+
+    candidates = [
+        BASE_DIR.parent / "resources" / "capcut" / "Voice.json",
+        BASE_DIR / "resources" / "capcut" / "Voice.json",
+    ]
+    catalog_path = next((p for p in candidates if p.is_file()), None)
+    items: list[dict[str, Any]] = []
+    if catalog_path:
+        try:
+            raw_list = json.loads(catalog_path.read_text(encoding="utf-8"))
+            for item in raw_list:
+                v_type = str(item.get("voice_type") or "").strip()
+                d_name = str(item.get("display_name") or "").strip()
+                res_id = str(item.get("resource_id") or "").strip()
+                if not v_type or not d_name or not res_id.isdigit():
+                    continue
+                if item.get("catalog_kind") == "digital_human_voice" or "neural" in v_type.lower():
+                    continue
+                lan = str(item.get("lan") or "vi").split("-")[0].lower()
+                if v_type not in CAPCUT_VOICES:
+                    CAPCUT_VOICES[v_type] = (d_name, res_id)
+                items.append(
+                    {
+                        "id": v_type,
+                        "name": d_name,
+                        "resource_id": res_id,
+                        "language": lan,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not read CapCut Voice.json: %s", exc)
+
+    if not items:
+        for v_type, (d_name, res_id) in CAPCUT_VOICES.items():
+            items.append({"id": v_type, "name": d_name, "resource_id": res_id, "language": "vi"})
+
+    _VOICE_CATALOG_CACHE = items
+    return items
 
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -321,12 +368,51 @@ def _signed_headers(device: dict[str, str], url: str, body: str, *, appid: bool 
 # Text to speech
 # ---------------------------------------------------------------------------
 def resolve_resource_id(voice: str) -> str:
+    list_capcut_voices()
     key = (voice or "").replace("capcut:", "").strip()
     if key in CAPCUT_VOICES:
         return CAPCUT_VOICES[key][1]
     # Unknown type: fall back to a Vietnamese female voice rather than fail,
     # which is what CapCap does for every type missing from its catalogue.
     return "7252594014782755330" if "vivn" in key.lower() else "7102355709945188865"
+
+
+def _post_control_json(
+    client: httpx.Client,
+    url: str,
+    *,
+    headers: dict[str, str],
+    body: str,
+    device: dict[str, str],
+    timeout: float = 60.0,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Send a signed CapCut control POST via either Web (httpx) or PC (sscronet.dll)."""
+    backend = (
+        (settings.capcut_backend if settings else "")
+        or os.environ.get("CAPCUT_BACKEND", "web")
+        or "web"
+    ).strip().lower()
+    host = (urlsplit(url).hostname or "").lower()
+    if backend == "pc" and host in capcut_pc_worker.API_HOSTS:
+        pc_path = (settings.capcut_pc_path if settings else "") or os.environ.get("CAPCUT_PC_PATH", "")
+        dll_path = capcut_pc_worker.find_capcut_pc_dll(pc_path)
+        status, _resp_headers, raw_body = capcut_pc_worker.native_request(
+            "POST",
+            url,
+            headers=headers,
+            body=body.encode("utf-8"),
+            timeout=timeout,
+            device=device,
+            dll_path=dll_path,
+        )
+        if status >= 400:
+            raise CapCutError(f"CapCut PC HTTP {status}: {raw_body.decode('utf-8', 'replace')[:300]}")
+        return json.loads(raw_body.decode("utf-8", "replace") or "{}")
+
+    response = client.post(url, headers=headers, content=body.encode("utf-8"), timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
 
 def _voice_type(voice: str) -> str:

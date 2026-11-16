@@ -8,10 +8,55 @@
 export type Aspect = "9:16" | "16:9" | "1:1";
 /** `capcut` / `bilibili` are cloud recognisers, `ocr` reads burned-in subtitles. */
 export type SttProvider = "local" | "sensevoice" | "groq" | "openai" | "capcut" | "bilibili" | "ocr";
-/** `google` / `bing` are the free web translators (no key). */
-export type TranslateProvider = "local" | "gemini" | "openai" | "google" | "bing";
-/** `capcut` is cloud, `omnivoice` runs on torch and `voicestudio` talks to its local server. */
-export type TtsProvider = "capcut" | "omnivoice" | "voicestudio";
+/** `google` / `bing` are the free web translators (no key); `deepseek` / `ollama` from CapCap. */
+export type TranslateProvider = "local" | "gemini" | "openai" | "deepseek" | "ollama" | "google" | "bing";
+/** `capcut` & `elevenlabs` are cloud, `omnivoice` runs on torch and `voicestudio` talks to its local server. */
+export type TtsProvider = "capcut" | "elevenlabs" | "omnivoice" | "voicestudio";
+
+export type SubtitlePresentationMode = "none" | "single" | "bilingual";
+export type QualityProfile = "high" | "balanced" | "low";
+export type LayerKind = "mask" | "blur" | "logo" | "text";
+
+export interface VisualLayer {
+  id: string;
+  kind: LayerKind;
+  label: string;
+  start: number;
+  end: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  color: string;
+  opacity: number;
+  text: string;
+  font_size: number;
+  image_path?: string | null;
+}
+
+export interface TranslationPreset {
+  id: string;
+  name: string;
+  description: string;
+  category?: string;
+}
+
+export interface ContextCharacter {
+  id: string;
+  name: string;
+  gender: string;
+  role: string;
+  self_pronoun: string;
+  address_others: string;
+}
+
+export interface ContextAnalyzeResult {
+  summary: string;
+  characters: ContextCharacter[];
+  pronoun_rules: Array<Record<string, string>>;
+  term_glossary: Array<Record<string, string>>;
+  context_guidance: string;
+}
 
 export interface SubtitleSegment {
   index: number;
@@ -21,6 +66,11 @@ export interface SubtitleSegment {
   translation?: string | null;
   speaker?: string | null;
   no_speech_prob?: number | null;
+  original_start?: number | null;
+  original_end?: number | null;
+  voice?: string | null;
+  speed?: number | null;
+  highlights?: Array<Record<string, unknown>> | null;
 }
 
 export interface ProbeResult {
@@ -140,6 +190,40 @@ export interface SubtitleStyle {
   margin_v: number;
   /** Percent of the width from the sides. */
   margin_h: number;
+  highlight_mode?: "none" | "color" | "scale";
+  highlight_color?: string;
+}
+
+export interface StylePresetItem {
+  id: string;
+  name: string;
+  style: SubtitleStyle;
+}
+
+export interface QueueItem {
+  id: string;
+  video_path: string;
+  title: string;
+  status: "pending" | "processing" | "ready_to_export" | "completed" | "error" | "stopped";
+  progress: number;
+  stage: string;
+  error?: string | null;
+  output_path?: string | null;
+  work_dir?: string | null;
+  source_mode: string;
+  target_language: string;
+  translate_provider: string;
+  translate_preset: string;
+  tts_provider: string;
+  tts_voice?: string | null;
+  aspect: string;
+}
+
+export interface QueueSnapshot {
+  running: boolean;
+  stop_after_current: boolean;
+  current_id?: string | null;
+  items: QueueItem[];
 }
 
 export const DEFAULT_SUBTITLE_STYLE: SubtitleStyle = {

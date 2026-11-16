@@ -13,9 +13,23 @@ from app.schemas.subtitle import (
     DubbingRequest,
     DubbingResult,
 )
-from app.services import tts_service
+from app.services import capcut_client, elevenlabs_tts, tts_service
 
 router = APIRouter(tags=["dubbing"])
+
+
+@router.get("/api/dubbing/voices")
+def list_voices(provider: str = "capcut", search: str = "", category: str = "") -> dict:
+    """Return available TTS voices for CapCut or ElevenLabs."""
+    if provider == "elevenlabs":
+        try:
+            voices = elevenlabs_tts.list_voices()
+            quota = elevenlabs_tts.get_quota()
+            return {"provider": "elevenlabs", "voices": voices, "quota": quota}
+        except Exception as exc:
+            return {"provider": "elevenlabs", "voices": [], "error": str(exc)}
+    voices = capcut_client.list_capcut_voices(search=search or None, category=category or None)
+    return {"provider": "capcut", "voices": voices}
 
 
 @router.post("/api/dubbing/synthesize", response_model=DubbingResult)
@@ -34,6 +48,7 @@ def synthesize(request: DubbingRequest) -> DubbingResult:
             timing_rewrite=request.timing_rewrite,
             language=request.language,
             video_path=request.video_path,
+            speaker_voices=request.speaker_voices,
             report=report,
         )
         return DubbingResult(

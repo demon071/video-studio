@@ -14,17 +14,81 @@ at any time to re-plan before a heavy stage.
 
 from __future__ import annotations
 
+import ctypes
 import gc
 import logging
 import os
 import platform
+import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from app.config import Settings, get_settings, resolve_ffmpeg, resolve_ffprobe
 
 log = logging.getLogger(__name__)
+
+# ctranslate2 wheels are built against CUDA 12 (`cublas64_12.dll`), while
+# onnxruntime-gpu on a CUDA 13 torch environment may need `torch/lib`
+# (`cublasLt64_13.dll`). Registering both DLL roots upfront lets Whisper and
+# RapidOCR run on the GPU without manual PATH edits.
+CUDA_12_DLLS = ("cublas64_12.dll", "cublasLt64_12.dll")
+
+
+def cuda_dll_dirs() -> list[str]:
+    """Folders holding CUDA runtime DLLs inside the active environment."""
+    roots = [Path(sys.prefix) / "Lib" / "site-packages"]
+    folders: list[str] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        folders.extend(sorted(str(path) for path in root.glob("nvidia/*/bin") if path.is_dir()))
+        torch_lib = root / "torch" / "lib"
+        if torch_lib.is_dir():
+            folders.append(str(torch_lib))
+    return folders
+
+
+@lru_cache(maxsize=1)
+def ensure_cuda_dlls() -> list[str]:
+    """Register packaged CUDA DLL directories with Windows and PATH."""
+    folders = cuda_dll_dirs()
+    if not folders:
+        return []
+    current_path = os.environ.get("PATH", "")
+    path_parts = current_path.split(os.pathsep) if current_path else []
+    added: list[str] = []
+    for folder in folders:
+        if folder not in path_parts:
+            added.append(folder)
+        try:
+            os.add_dll_directory(folder)
+        except (AttributeError, OSError):
+            pass
+    if added:
+        os.environ["PATH"] = os.pathsep.join([*added, current_path]) if current_path else os.pathsep.join(added)
+    return folders
+
+
+def ctranslate2_cuda_ready() -> bool:
+    """True when ctranslate2 sees a GPU and its CUDA 12 cublas DLLs load."""
+    ensure_cuda_dlls()
+    folders = cuda_dll_dirs()
+    for name in CUDA_12_DLLS:
+        for candidate in [name, *(str(Path(folder) / name) for folder in folders)]:
+            try:
+                ctypes.CDLL(candidate)
+                break
+            except OSError:
+                continue
+        else:
+            return False
+    return True
+
+
+ensure_cuda_dlls()
 
 # The two offline translators: Qwen2.5-3B-Instruct has 36 transformer blocks
 # (2.0 GB, Q4_K_M), Gemma 3 4B has 34 (2.4 GB). A block of the larger build plus
@@ -239,7 +303,10 @@ __all__ = [
     "QWEN_3B_LAYERS",
     "HardwareProfile",
     "cpu_threads",
+    "ctranslate2_cuda_ready",
+    "cuda_dll_dirs",
     "detect",
+    "ensure_cuda_dlls",
     "release_vram",
     "vram_snapshot",
 ]

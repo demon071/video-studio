@@ -17,12 +17,33 @@ if (-not (Test-Path $python)) {
     exit 1
 }
 
+# Keep all temp files, model caches, and app data inside the project on D: drive
+$tmpDir = Join-Path $root ".tmp"
+$cacheDir = Join-Path $root ".cache"
+$torchLib = Join-Path $root ".venv\Lib\site-packages\torch\lib"
+New-Item -ItemType Directory -Force -Path $tmpDir, $cacheDir | Out-Null
+$env:TEMP = $tmpDir
+$env:TMP = $tmpDir
+$env:PIP_NO_CACHE_DIR = "1"
+if (Test-Path $torchLib) { $env:PATH = "$torchLib;$env:PATH" }
+if (-not $env:HF_HOME) { $env:HF_HOME = Join-Path $cacheDir "huggingface" }
+if (-not $env:TORCH_HOME) { $env:TORCH_HOME = Join-Path $cacheDir "torch" }
+if (-not $env:SVA_DATA_DIR) { $env:SVA_DATA_DIR = Join-Path $cacheDir "ShortVideoAI" }
+
 # UTF-8 everywhere: subtitles are Vietnamese/Japanese/Chinese, not ASCII.
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONPATH = $backend
 $env:SVA_PORT = "$Port"
 $env:SVA_PACKAGED = "0"
+
+# Free port if an older dev backend instance is still holding it
+$existing = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
+foreach ($pidToKill in $existing) {
+    if ($pidToKill -and $pidToKill -ne $PID) {
+        Stop-Process -Id $pidToKill -Force -ErrorAction SilentlyContinue
+    }
+}
 
 Write-Host ""
 Write-Host ("  ShortVideoAI engine -> http://127.0.0.1:{0}" -f $Port) -ForegroundColor Cyan

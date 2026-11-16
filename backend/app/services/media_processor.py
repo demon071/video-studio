@@ -26,9 +26,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import Settings, get_settings, resolve_ffmpeg, resolve_ffprobe
+from app.schemas.subtitle import VisualLayer
 from app.services import model_manager
 
 log = logging.getLogger(__name__)
+
+# CapCap boundary silence trimming policy (tts_audio_policy.py)
+BOUNDARY_SILENCE_DB = -60.0
+BOUNDARY_MIN_SILENCE_SECONDS = 0.35
+BOUNDARY_PADDING_SECONDS = 0.12
 
 # Keep console windows from flashing in front of the Tauri window.
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -383,6 +389,39 @@ def atempo_chain(ratio: float) -> str:
     return ",".join(f"atempo={factor:.5f}" for factor in factors)
 
 
+def trim_boundary_silence(
+    audio_path: str | Path,
+    output_path: str | Path | None = None,
+    *,
+    silence_db: float = BOUNDARY_SILENCE_DB,
+    min_silence_s: float = BOUNDARY_MIN_SILENCE_SECONDS,
+    padding_s: float = BOUNDARY_PADDING_SECONDS,
+) -> Path:
+    """Trim leading and trailing silence from a TTS clip (CapCap policy)."""
+    source = Path(audio_path)
+    target = Path(output_path) if output_path else source
+    tmp_out = target.with_name(f"{target.stem}.trim_tmp{target.suffix}")
+    af = (
+        f"silenceremove=start_periods=1:start_duration={min_silence_s:.2f}:start_threshold={silence_db:.1f}dB:"
+        f"leave_silence={padding_s:.2f},areverse,"
+        f"silenceremove=start_periods=1:start_duration={min_silence_s:.2f}:start_threshold={silence_db:.1f}dB:"
+        f"leave_silence={padding_s:.2f},areverse"
+    )
+    try:
+        _run([*_base(), "-i", str(source), "-af", af, "-c:a", "pcm_s16le", str(tmp_out)])
+        if tmp_out.is_file() and tmp_out.stat().st_size > 100 and probe_duration(tmp_out) > 0.05:
+            tmp_out.replace(target)
+        else:
+            tmp_out.unlink(missing_ok=True)
+            if target != source:
+                shutil.copyfile(source, target)
+    except Exception:
+        tmp_out.unlink(missing_ok=True)
+        if target != source:
+            shutil.copyfile(source, target)
+    return target
+
+
 def stretch_to_fit(
     source_audio: str | Path,
     output_path: str | Path,
@@ -392,6 +431,7 @@ def stretch_to_fit(
     end: float,
     max_ratio: float | None = None,
     sample_rate: int = 24_000,
+    trim_silence: bool = False,
 ) -> SyncReport:
     """Compress a TTS clip so it lands inside ``[start, end]``.
 
@@ -405,6 +445,9 @@ def stretch_to_fit(
     source = Path(source_audio)
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    if trim_silence:
+        trim_boundary_silence(source)
 
     target_duration = max(end - start, 0.05)
     tts_duration = probe_duration(source)
@@ -584,9 +627,16 @@ def render_final(
     dub_track_path: str | Path | None = None,
     background_path: str | Path | None = None,
     background_gain: float = 0.35,
+    voice_gain: float = 1.0,
     keep_original_audio: bool = False,
     crf: int = 20,
     preset: str = "medium",
+    quality_profile: str | None = None,
+    use_nvenc: bool = False,
+    flip_horizontal: bool = False,
+    layers: Sequence[VisualLayer] = (),
+    start_time: float | None = None,
+    sample_duration: float | None = None,
     progress: ProgressFn | None = None,
 ) -> Path:
     """Produce the final deliverable: framed video, burned subtitles, dub audio.
@@ -601,17 +651,31 @@ def render_final(
     target.parent.mkdir(parents=True, exist_ok=True)
 
     info = probe_video(source)
-    duration = info.duration or probe_duration(source)
+    full_duration = info.duration or probe_duration(source)
+    clip_start = max(float(start_time or 0.0), 0.0)
+    duration = (
+        min(float(sample_duration), max(full_duration - clip_start, 0.5))
+        if sample_duration and sample_duration > 0
+        else max(full_duration - clip_start, 0.5)
+    )
 
-    inputs: list[str] = ["-i", str(source)]
+    if quality_profile == "low":
+        crf = 26
+        preset = "veryfast"
+    elif quality_profile == "balanced":
+        crf = 22
+        preset = "fast"
+
+    seek_args = ["-ss", f"{clip_start:.3f}"] if clip_start > 0 else []
+    inputs: list[str] = [*seek_args, "-i", str(source)]
     next_index = 1
     dub_index = bg_index = None
     if dub_track_path:
-        inputs.extend(["-i", str(dub_track_path)])
+        inputs.extend([*seek_args, "-i", str(dub_track_path)])
         dub_index = next_index
         next_index += 1
     if background_path:
-        inputs.extend(["-i", str(background_path)])
+        inputs.extend([*seek_args, "-i", str(background_path)])
         bg_index = next_index
         next_index += 1
 
@@ -623,8 +687,47 @@ def render_final(
     if aspect in TARGET_ASPECTS:
         filters.append(f"scale={width}:{height}:force_original_aspect_ratio=increase")
         filters.append(f"crop={width}:{height}")
+    if flip_horizontal:
+        filters.append("hflip")
     filters.append("setsar=1")
     filters.append("format=yuv420p")
+
+    # Apply visual layers (Mask, Blur, Text)
+    for layer in layers:
+        lx = max(0, min(width - 4, int(round(layer.x * width))))
+        ly = max(0, min(height - 4, int(round(layer.y * height))))
+        lw = max(4, min(width - lx, int(round(layer.w * width))))
+        lh = max(4, min(height - ly, int(round(layer.h * height))))
+        enable_expr = ""
+        if layer.end > layer.start:
+            ls = max(0.0, layer.start - clip_start)
+            le = max(ls + 0.05, layer.end - clip_start)
+            enable_expr = f":enable='between(t,{ls:.3f},{le:.3f})'"
+        if layer.kind == "mask":
+            color_hex = (layer.color or "#000000").lstrip("#")
+            alpha = max(0.05, min(1.0, float(layer.opacity)))
+            filters.append(
+                f"drawbox=x={lx}:y={ly}:w={lw}:h={lh}:color=0x{color_hex}@{alpha:.2f}:t=fill{enable_expr}"
+            )
+        elif layer.kind == "blur":
+            # Safe delogo/drawbox blur approximation inside frame bounds
+            bx = max(1, min(width - 6, lx))
+            by = max(1, min(height - 6, ly))
+            bw = max(4, min(width - bx - 2, lw))
+            bh = max(4, min(height - by - 2, lh))
+            filters.append(f"delogo=x={bx}:y={by}:w={bw}:h={bh}{enable_expr}")
+        elif layer.kind == "text" and layer.text.strip():
+            safe_txt = (
+                layer.text.strip()
+                .replace("\\", "\\\\")
+                .replace(":", "\\:")
+                .replace("'", "\\'")
+            )
+            fcolor = (layer.color or "#FFFFFF").lstrip("#")
+            fsize = max(12, int(layer.font_size or 32))
+            filters.append(
+                f"drawtext=text='{safe_txt}':x={lx}:y={ly}:fontsize={fsize}:fontcolor=0x{fcolor}{enable_expr}"
+            )
 
     work_dir = target.parent
     if subtitle_path:
@@ -648,55 +751,278 @@ def render_final(
         # The bed is an explicit stem when one is supplied, otherwise the
         # clip's own soundtrack (input 0): the dub is mixed on top of it.
         bed = bg_index if bg_index is not None else (0 if keep_original_audio and info.has_audio else None)
+        v_gain = min(max(voice_gain, 0.0), 3.0)
+        dub_vol = f",volume={v_gain:.3f}" if abs(v_gain - 1.0) > 0.01 else ""
         if bed is None:
-            complex_parts.append(f"[{dub_index}:a]aresample=48000[aout]")
+            complex_parts.append(f"[{dub_index}:a]aresample=48000{dub_vol}[aout]")
         else:
             gain = min(max(background_gain, 0.0), 1.0)
-            complex_parts.append(
-                f"[{bed}:a]aresample=48000,volume={gain:.3f}[bg];"
-                f"[bg][{dub_index}:a]sidechaincompress=threshold=0.03:ratio=9:attack=15:release=280[duck];"
-                f"[duck][{dub_index}:a]amix=inputs=2:normalize=0:dropout_transition=0,"
-                f"alimiter=limit=0.97[aout]"
-            )
+            if dub_vol:
+                complex_parts.append(
+                    f"[{bed}:a]aresample=48000,volume={gain:.3f}[bg];"
+                    f"[{dub_index}:a]aresample=48000{dub_vol},asplit=2[dub1][dub2];"
+                    f"[bg][dub1]sidechaincompress=threshold=0.03:ratio=9:attack=15:release=280[duck];"
+                    f"[duck][dub2]amix=inputs=2:normalize=0:dropout_transition=0,"
+                    f"alimiter=limit=0.97[aout]"
+                )
+            else:
+                complex_parts.append(
+                    f"[{bed}:a]aresample=48000,volume={gain:.3f}[bg];"
+                    f"[bg][{dub_index}:a]sidechaincompress=threshold=0.03:ratio=9:attack=15:release=280[duck];"
+                    f"[duck][{dub_index}:a]amix=inputs=2:normalize=0:dropout_transition=0,"
+                    f"alimiter=limit=0.97[aout]"
+                )
         audio_map = "[aout]"
     elif keep_original_audio:
         audio_map = "0:a?"
 
-    args: list[str] = [*_base(quiet=True), *inputs]
-    if complex_parts:
-        # Video filters and audio graph must live in one filter_complex when both
-        # are needed, otherwise ffmpeg maps the raw streams.
-        complex_parts.insert(0, f"[0:v]{filter_graph}[vout]")
-        args.extend(["-filter_complex", ";".join(complex_parts)])
-        args.extend(["-map", "[vout]"])
-    else:
-        args.extend(["-vf", filter_graph, "-map", "0:v:0"])
+    def _build_args(nvenc: bool) -> list[str]:
+        cmd_args: list[str] = [*_base(quiet=True), *inputs]
+        if complex_parts:
+            parts = [f"[0:v]{filter_graph}[vout]", *complex_parts]
+            cmd_args.extend(["-filter_complex", ";".join(parts)])
+            cmd_args.extend(["-map", "[vout]"])
+        else:
+            cmd_args.extend(["-vf", filter_graph, "-map", "0:v:0"])
 
-    if audio_map:
-        args.extend(["-map", audio_map])
-    elif not keep_original_audio:
-        args.append("-an")
+        if audio_map:
+            cmd_args.extend(["-map", audio_map])
+        elif not keep_original_audio:
+            cmd_args.append("-an")
 
-    args.extend(
-        [
-            "-t",
-            f"{duration:.3f}",
-            "-c:v",
-            "libx264",
-            "-crf",
-            str(crf),
-            "-preset",
-            preset,
-            "-pix_fmt",
-            "yuv420p",
-            *(["-c:a", "aac", "-b:a", "192k", "-ar", "48000"] if audio_map else []),
-            "-movflags",
-            "+faststart",
-            str(target),
-        ]
+        vcodec = (
+            ["-c:v", "h264_nvenc", "-cq", str(crf), "-preset", "p4"]
+            if nvenc
+            else ["-c:v", "libx264", "-crf", str(crf), "-preset", preset]
+        )
+        cmd_args.extend(
+            [
+                "-t",
+                f"{duration:.3f}",
+                *vcodec,
+                "-pix_fmt",
+                "yuv420p",
+                *(["-c:a", "aac", "-b:a", "192k", "-ar", "48000"] if audio_map else []),
+                "-movflags",
+                "+faststart",
+                str(target),
+            ]
+        )
+        return cmd_args
+
+    if use_nvenc:
+        try:
+            _run(_build_args(True), progress=progress, duration=duration, cwd=work_dir)
+            return target
+        except MediaError:
+            log.warning("h264_nvenc unavailable or failed; falling back to libx264")
+
+    _run(_build_args(False), progress=progress, duration=duration, cwd=work_dir)
+    return target
+
+
+# ---------------------------------------------------------------------------
+# CapCap Standalone FFmpeg Media Tools & Audio Export
+# ---------------------------------------------------------------------------
+def export_audio_only(
+    output_path: str | Path,
+    *,
+    mode: str = "mix",
+    dub_track_path: str | Path | None = None,
+    background_path: str | Path | None = None,
+    video_path: str | Path | None = None,
+    background_gain: float = 0.35,
+    voice_gain: float = 1.0,
+) -> Path:
+    """Export standalone audio: ``voice`` (dub only), ``bgm`` (background/bed only), or ``mix``."""
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ext = target.suffix.lower()
+    codec = ["-c:a", "libmp3lame", "-q:a", "2"] if ext == ".mp3" else ["-c:a", "pcm_s16le"]
+
+    if mode == "voice":
+        if not dub_track_path or not Path(dub_track_path).is_file():
+            raise MediaError("Chưa có track lồng tiếng để xuất Voice.")
+        _run([*_base(), "-i", str(dub_track_path), "-af", f"volume={voice_gain:.3f}", *codec, str(target)])
+        return target
+
+    bed_source = background_path or video_path
+    if mode == "bgm":
+        if not bed_source or not Path(bed_source).is_file():
+            raise MediaError("Không tìm thấy nguồn nhạc nền / video để xuất BGM.")
+        _run([*_base(), "-i", str(bed_source), "-vn", "-af", f"volume={background_gain:.3f}", *codec, str(target)])
+        return target
+
+    # mode == "mix"
+    if dub_track_path and Path(dub_track_path).is_file() and bed_source and Path(bed_source).is_file():
+        fc = (
+            f"[0:a]aresample=48000,volume={background_gain:.3f}[bg];"
+            f"[1:a]aresample=48000,volume={voice_gain:.3f}[dub];"
+            f"[bg][dub]sidechaincompress=threshold=0.03:ratio=9:attack=15:release=280[duck];"
+            f"[duck][dub]amix=inputs=2:normalize=0:dropout_transition=0,alimiter=limit=0.97[a]"
+        )
+        _run([*_base(), "-i", str(bed_source), "-i", str(dub_track_path), "-filter_complex", fc, "-map", "[a]", *codec, str(target)])
+        return target
+    if dub_track_path and Path(dub_track_path).is_file():
+        return export_audio_only(target, mode="voice", dub_track_path=dub_track_path, voice_gain=voice_gain)
+    if bed_source and Path(bed_source).is_file():
+        return export_audio_only(target, mode="bgm", background_path=bed_source, background_gain=background_gain)
+    raise MediaError("Không có nguồn âm thanh nào để xuất.")
+
+
+def trim_media(
+    video_path: str | Path,
+    output_path: str | Path,
+    *,
+    start: float,
+    end: float,
+    reencode: bool = False,
+) -> Path:
+    """Cut a segment ``[start, end]`` from a media file (CapCap Media Tool Tab 1)."""
+    source = Path(video_path)
+    if not source.is_file():
+        raise MediaError(f"Không tìm thấy tệp: {source}")
+    if end <= start:
+        raise MediaError("Thời gian kết thúc phải lớn hơn thời gian bắt đầu.")
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    dur = end - start
+    codec = (
+        ["-c:v", "libx264", "-crf", "20", "-preset", "fast", "-c:a", "aac"]
+        if reencode
+        else ["-c", "copy"]
     )
+    _run([*_base(), "-ss", f"{start:.3f}", "-i", str(source), "-t", f"{dur:.3f}", *codec, str(target)])
+    return target
 
-    _run(args, progress=progress, duration=duration, cwd=work_dir)
+
+def concat_media(
+    video_paths: Sequence[str | Path],
+    output_path: str | Path,
+    *,
+    reencode: bool = False,
+) -> Path:
+    """Concatenate multiple video files in order (CapCap Media Tool Tab 2)."""
+    if len(video_paths) < 2:
+        raise MediaError("Cần ít nhất 2 video để ghép.")
+    sources = [Path(p) for p in video_paths]
+    for src in sources:
+        if not src.is_file():
+            raise MediaError(f"Không tìm thấy tệp: {src}")
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    list_file = target.with_name(f".concat_{target.stem}.txt")
+    try:
+        lines = [f"file '{src.resolve().as_posix()}'" for src in sources]
+        list_file.write_text("\n".join(lines), encoding="utf-8")
+        codec = (
+            ["-c:v", "libx264", "-crf", "21", "-preset", "fast", "-c:a", "aac"]
+            if reencode
+            else ["-c", "copy"]
+        )
+        _run([*_base(), "-f", "concat", "-safe", "0", "-i", str(list_file), *codec, str(target)])
+    finally:
+        list_file.unlink(missing_ok=True)
+    return target
+
+
+def extract_streams(
+    video_path: str | Path,
+    *,
+    audio_output: str | Path | None = None,
+    video_only_output: str | Path | None = None,
+) -> dict[str, str]:
+    """Extract audio stream and/or mute video stream (CapCap Media Tool Tab 3)."""
+    source = Path(video_path)
+    if not source.is_file():
+        raise MediaError(f"Không tìm thấy tệp: {source}")
+    result: dict[str, str] = {}
+    if audio_output:
+        a_out = Path(audio_output)
+        a_out.parent.mkdir(parents=True, exist_ok=True)
+        ext = a_out.suffix.lower()
+        acodec = ["-c:a", "libmp3lame", "-q:a", "2"] if ext == ".mp3" else ["-c:a", "pcm_s16le"]
+        _run([*_base(), "-i", str(source), "-vn", *acodec, str(a_out)])
+        result["audio_path"] = str(a_out)
+    if video_only_output:
+        v_out = Path(video_only_output)
+        v_out.parent.mkdir(parents=True, exist_ok=True)
+        _run([*_base(), "-i", str(source), "-an", "-c:v", "copy", str(v_out)])
+        result["video_path"] = str(v_out)
+    return result
+
+
+def mux_audio_video(
+    video_path: str | Path,
+    audio_path: str | Path,
+    output_path: str | Path,
+    *,
+    replace_audio: bool = True,
+    audio_gain: float = 1.0,
+) -> Path:
+    """Mux an audio file into a video (replace or mix) (CapCap Media Tool Tab 4)."""
+    v_src = Path(video_path)
+    a_src = Path(audio_path)
+    if not v_src.is_file():
+        raise MediaError(f"Không tìm thấy video: {v_src}")
+    if not a_src.is_file():
+        raise MediaError(f"Không tìm thấy âm thanh: {a_src}")
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    info = probe_video(v_src)
+
+    if replace_audio or not info.has_audio:
+        _run(
+            [
+                *_base(),
+                "-i",
+                str(v_src),
+                "-i",
+                str(a_src),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "copy",
+                "-af",
+                f"volume={audio_gain:.3f}",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-shortest",
+                str(target),
+            ]
+        )
+    else:
+        fc = (
+            f"[0:a]aresample=48000[a0];"
+            f"[1:a]aresample=48000,volume={audio_gain:.3f}[a1];"
+            f"[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+        )
+        _run(
+            [
+                *_base(),
+                "-i",
+                str(v_src),
+                "-i",
+                str(a_src),
+                "-filter_complex",
+                fc,
+                "-map",
+                "0:v:0",
+                "-map",
+                "[aout]",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                str(target),
+            ]
+        )
     return target
 
 
@@ -729,12 +1055,16 @@ __all__ = [
     "VideoInfo",
     "atempo_chain",
     "build_dub_track",
+    "concat_media",
     "escape_filter_path",
+    "export_audio_only",
     "extract_audio",
+    "extract_streams",
     "ffmpeg_path",
     "ffprobe_path",
     "generate_thumbnail",
     "mix_background",
+    "mux_audio_video",
     "probe_audio",
     "probe_duration",
     "probe_video",
@@ -742,4 +1072,6 @@ __all__ = [
     "run_ffmpeg",
     "separate_vocals",
     "stretch_to_fit",
+    "trim_boundary_silence",
+    "trim_media",
 ]

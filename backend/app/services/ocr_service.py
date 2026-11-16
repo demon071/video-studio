@@ -29,10 +29,16 @@ before the new text replaces the old one.
 from __future__ import annotations
 
 import logging
+import os
+import queue
 import re
 import shutil
+import subprocess
+import tempfile
+import threading
 import unicodedata
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from functools import lru_cache
@@ -40,12 +46,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.config import Settings, get_settings
+from app.core import hardware
 from app.core.progress import NULL_REPORTER, Reporter
 from app.services import media_processor, provider_config
 
 log = logging.getLogger(__name__)
 
-ENGINES = ("rapidocr", "paddleocr", "easyocr")
+ENGINES = ("rapidocr", "winocr", "paddleocr", "easyocr")
 # Speed/accuracy profiles, mirroring the reference project's two cards:
 # "PP-OCRv6 Small - Chính xác" and "PP-OCRv6 Tiny Det - Nhanh/chuẩn".
 PROFILES = ("small", "tiny")
@@ -108,12 +115,12 @@ class OcrError(RuntimeError):
 
 
 class _Reader(Protocol):
-    def __call__(self, image: Path) -> list[str]:
+    def __call__(self, image: Path | Any) -> list[str]:
         """Return the text lines found in one frame, top to bottom."""
 
 
 # ---------------------------------------------------------------------------
-# Frame sampling
+# Frame sampling & streaming (ported from 01_TachSub_Studio)
 # ---------------------------------------------------------------------------
 def _crop(position: str, band: float) -> str:
     """ffmpeg crop expression for the part of the frame a subtitle lives in."""
@@ -243,9 +250,295 @@ def cue_offsets(start: float, end: float, samples: int = 3) -> list[float]:
     return [round(begin + span * (index + 0.5) / count, 3) for index in range(count)]
 
 
+def _resolved_percent_region(
+    position: str = "bottom",
+    band: float = DEFAULT_BAND,
+    region: tuple[float, float, float, float] | None = None,
+) -> tuple[float, float, float, float]:
+    if region is not None:
+        return region
+    if position == "full":
+        return (0.0, 0.0, 100.0, 100.0)
+    share = min(max(band, 0.1), 1.0) * 100.0
+    if position == "top":
+        return (0.0, 0.0, 100.0, share)
+    return (0.0, 100.0 - share, 100.0, 100.0)
+
+
+def _dilate_5x5(mask: Any) -> Any:
+    """5x5 binary dilation in pure NumPy (matches cv2.dilate(..., np.ones((5, 5))))."""
+    import numpy as np  # noqa: PLC0415
+
+    padded = np.pad(mask, 2, mode="constant", constant_values=False)
+    h, w = mask.shape
+    horiz = (
+        padded[:, 0:w]
+        | padded[:, 1 : w + 1]
+        | padded[:, 2 : w + 2]
+        | padded[:, 3 : w + 3]
+        | padded[:, 4 : w + 4]
+    )
+    return (
+        horiz[0:h, :]
+        | horiz[1 : h + 1, :]
+        | horiz[2 : h + 2, :]
+        | horiz[3 : h + 3, :]
+        | horiz[4 : h + 4, :]
+    )
+
+
+def text_mask(frame: Any) -> Any:
+    """Bright-glyph + dark-outline mask (ported from 01_TachSub_Studio).
+
+    Hard-burned subtitles are drawn as bright glyphs (>200) bordered by a dark
+    stroke or shadow (<90). Comparing this boolean mask between consecutive
+    frames tells whether the subtitle on screen changed in <0.3 ms without
+    running the neural detector on every frame.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    arr = np.asarray(frame)
+    if arr.ndim == 3:
+        gray = (
+            (arr[:, :, 2].astype(np.uint16) * 77 + arr[:, :, 1].astype(np.uint16) * 150 + arr[:, :, 0].astype(np.uint16) * 29)
+            >> 8
+        ).astype(np.uint8)
+    else:
+        gray = arr
+    return (gray > 200) & _dilate_5x5(gray < 90)
+
+
+def frame_unchanged(mask: Any, previous_mask: Any, *, threshold: float = 0.01) -> bool:
+    """True when the subtitle mask changed by less than ``threshold`` (default 1%)."""
+    if mask is None or previous_mask is None:
+        return False
+    import numpy as np  # noqa: PLC0415
+
+    active = int(np.count_nonzero(mask | previous_mask))
+    if active == 0:
+        return False
+    difference = int(np.count_nonzero(mask ^ previous_mask)) / active
+    return difference < threshold
+
+
+def stream_frames(
+    video: Path,
+    *,
+    fps: float,
+    position: str = "bottom",
+    band: float = DEFAULT_BAND,
+    region: tuple[float, float, float, float] | None = None,
+    start: float = 0.0,
+    end: float | None = None,
+    report: Reporter = NULL_REPORTER,
+) -> Iterator[tuple[float, Any]]:
+    """Stream cropped BGR24 frames from FFmpeg directly into memory.
+
+    Ported from ``01_TachSub_Studio`` (``OCREngine._frames``): instead of
+    encoding hundreds of PNG files to disk and decoding them back, FFmpeg pipes
+    cropped ``bgr24`` buffers into a bounded 3-frame queue while the OCR reader
+    consumes them concurrently.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    info = media_processor.probe_video(video)
+    if not info.width or not info.height:
+        raise OcrError("OCR requires a video stream")
+
+    left, top, right, bottom = _resolved_percent_region(position, band, region)
+    rx = max(0.0, min(left / 100.0, 0.99))
+    ry = max(0.0, min(top / 100.0, 0.99))
+    rw = max(0.01, min((right - left) / 100.0, 1.0 - rx))
+    rh = max(0.01, min((bottom - top) / 100.0, 1.0 - ry))
+
+    width = max(2, int(info.width * rw) // 2 * 2)
+    height = max(2, int(info.height * rh) // 2 * 2)
+    x = max(0, min(int(info.width * rx), info.width - width))
+    y = max(0, min(int(info.height * ry), info.height - height))
+    output_width = min(width, 1600)
+    output_height = max(2, round(height * output_width / width))
+
+    vf = f"crop={width}:{height}:{x}:{y},fps={fps:.3f},scale={output_width}:{output_height}"
+    cmd: list[str] = [
+        media_processor.ffmpeg_path(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+    ]
+    begin = max(0.0, float(start))
+    if begin > 0:
+        cmd.extend(["-ss", f"{begin:.3f}"])
+    cmd.extend(["-i", str(video)])
+    if end is not None and float(end) > begin:
+        cmd.extend(["-t", f"{float(end) - begin:.3f}"])
+    cmd.extend(["-an", "-sn", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"])
+
+    frames: queue.Queue[bytes | None] = queue.Queue(maxsize=3)
+    stop = threading.Event()
+    step = 1.0 / max(fps, 0.1)
+
+    with tempfile.TemporaryFile() as errors:
+        proc = subprocess.Popen(  # noqa: S603 - args built internally
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=errors,
+            stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+        def _read_pipe() -> None:
+            frame_bytes = output_width * output_height * 3
+            assert proc.stdout is not None
+            try:
+                while not stop.is_set():
+                    data = bytearray()
+                    while len(data) < frame_bytes:
+                        chunk = proc.stdout.read(frame_bytes - len(data))
+                        if not chunk:
+                            break
+                        data.extend(chunk)
+                    item = bytes(data) if len(data) == frame_bytes else None
+                    while not stop.is_set():
+                        try:
+                            frames.put(item, timeout=0.2)
+                            break
+                        except queue.Full:
+                            continue
+                    if item is None:
+                        break
+            finally:
+                proc.stdout.close()
+
+        reader = threading.Thread(target=_read_pipe, daemon=True)
+        reader.start()
+        try:
+            number = 0
+            while True:
+                report(emit=True)
+                try:
+                    data = frames.get(timeout=0.2)
+                except queue.Empty:
+                    if proc.poll() is not None and not reader.is_alive():
+                        break
+                    continue
+                if data is None:
+                    break
+                when = round(begin + (number + 0.5) * step, 3)
+                frame = np.frombuffer(data, dtype=np.uint8).reshape(output_height, output_width, 3)
+                yield when, frame
+                number += 1
+            proc.wait(timeout=30)
+            if proc.returncode:
+                errors.seek(0)
+                detail = errors.read().decode("utf-8", "replace")[-2000:]
+                raise OcrError(f"FFmpeg rawvideo stream failed: {detail}")
+        finally:
+            stop.set()
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            reader.join(timeout=3)
+
+
 # ---------------------------------------------------------------------------
-# Engines
+# Engines & CapCap OCR sanitization / detector buffer reuse
 # ---------------------------------------------------------------------------
+_OCR_HANDLE_RE = re.compile(r"@\s*[A-Za-z0-9_\-\u3400-\u9fff]{1,24}")
+_OCR_WATERMARK_PATTERNS = (
+    re.compile(r"[\u3400-\u9fff]{1,6}漫(?:剧|居|刷)"),
+    re.compile(r"专店"),
+)
+_OCR_RADICAL_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    ("亻尔", "你"),
+    ("亻故", "做"),
+    ("亻门", "们"),
+    ("亻旦", "但"),
+    ("亻也", "他"),
+    ("亻义", "仪"),
+    ("亻青", "倩"),
+    ("彳亍", "行"),
+    ("讠兑", "说"),
+    ("讠青", "请"),
+    ("讠讠", "计"),
+)
+
+
+def sanitize_ocr_line(text: str) -> str:
+    """Clean watermarks, @handles, and split CJK radicals (ported from CapCap)."""
+    cleaned = _SPACE_RE.sub(" ", str(text or "").replace("\n", " ")).strip()
+    if not cleaned:
+        return ""
+    cleaned = _OCR_HANDLE_RE.sub(" ", cleaned)
+    for pattern in _OCR_WATERMARK_PATTERNS:
+        cleaned = pattern.sub(" ", cleaned)
+    for r_from, r_to in _OCR_RADICAL_REPLACEMENTS:
+        cleaned = cleaned.replace(r_from, r_to)
+    return _SPACE_RE.sub(" ", cleaned).strip()
+
+
+class _ReusableDetectorPreProcess:
+    """RapidOCR detector preprocessing with reusable numeric work buffers (ported from CapCap)."""
+
+    def __init__(self, target: Any, shared_buffers: dict[tuple[int, ...], dict[str, Any]]) -> None:
+        self._target = target
+        self._shared_buffers = shared_buffers
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+    def __call__(self, image: Any) -> Any:
+        import numpy as np  # noqa: PLC0415
+
+        resized = self._target.resize(image)
+        if resized is None:
+            return None
+        shape = tuple(resized.shape)
+        buffers = self._shared_buffers.get(shape)
+        if buffers is None:
+            height, width, channels = shape
+            buffers = {
+                "float32": np.empty(shape, dtype=np.float32),
+                "float64": np.empty(shape, dtype=np.float64),
+                "output": np.empty((1, channels, height, width), dtype=np.float32),
+            }
+            self._shared_buffers[shape] = buffers
+
+        float32_buffer = buffers["float32"]
+        float64_buffer = buffers["float64"]
+        output = buffers["output"]
+
+        np.copyto(float32_buffer, resized, casting="unsafe")
+        float32_buffer *= self._target.scale
+        np.copyto(float64_buffer, float32_buffer, casting="unsafe")
+        float64_buffer -= self._target.mean
+        float64_buffer /= self._target.std
+        np.copyto(output[0], float64_buffer.transpose((2, 0, 1)), casting="unsafe")
+        return output
+
+
+def _enable_reusable_detector_preprocess(engine: Any) -> Any:
+    detector = getattr(engine, "text_det", None)
+    if detector is None or getattr(detector, "_sva_reusable_preprocess", False):
+        return engine
+    original_get_preprocess = getattr(detector, "get_preprocess", None)
+    if not callable(original_get_preprocess):
+        return engine
+    shared_buffers: dict[tuple[int, ...], dict[str, Any]] = {}
+
+    def get_preprocess(max_side: Any) -> Any:
+        target = original_get_preprocess(max_side)
+        return _ReusableDetectorPreProcess(target, shared_buffers)
+
+    detector.get_preprocess = get_preprocess
+    detector._sva_reusable_preprocess = True
+    return engine
+
+
 def _ordered(lines: list[tuple[Any, str, float]]) -> list[str]:
     """Sort detections the way they are read: by row, then left to right."""
 
@@ -258,7 +551,7 @@ def _ordered(lines: list[tuple[Any, str, float]]) -> list[str]:
         top = min(float(point[1]) for point in points)
         return top, left
 
-    usable = [(origin(box), text, score) for box, text, score in lines if text and score >= MIN_CONFIDENCE]
+    usable = [(origin(box), sanitize_ocr_line(text), score) for box, text, score in lines if text and score >= MIN_CONFIDENCE]
     usable.sort(key=lambda item: (round(item[0][0] / 12), item[0][1]))
     return [text.strip() for _, text, _ in usable if text.strip() and not _SYMBOL_ONLY_RE.match(text.strip())]
 
@@ -308,6 +601,7 @@ def onnx_providers() -> list[str]:
 
 @lru_cache(maxsize=1)
 def _providers() -> list[str]:
+    hardware.ensure_cuda_dlls()
     try:
         import onnxruntime as ort  # noqa: PLC0415 - optional and heavy
     except ImportError:
@@ -520,9 +814,11 @@ def _rapidocr(
                         "rapidocr stayed on CPU (%s) - install onnxruntime-gpu or onnxruntime-directml",
                         ", ".join(active) or "no providers",
                     )
+        _enable_reusable_detector_preprocess(engine)
 
-    def read(image: Path) -> list[str]:
-        output = engine(str(image))
+    def read(image: Path | Any) -> list[str]:
+        target = str(image) if isinstance(image, Path) else image
+        output = engine(target)
         # v3 answers with a result object, the legacy build with (rows, timing).
         txts = getattr(output, "txts", None)
         if txts is not None:
@@ -565,8 +861,9 @@ def _paddleocr(language: str, device: str = "cpu") -> tuple[_Reader, str]:
         except TypeError:  # pragma: no cover - newer builds dropped show_log
             engine = PaddleOCR(lang=lang)
 
-    def read(image: Path) -> list[str]:
-        result = engine.ocr(str(image), cls=False)
+    def read(image: Path | Any) -> list[str]:
+        target = str(image) if isinstance(image, Path) else image
+        result = engine.ocr(target, cls=False)
         page = result[0] if isinstance(result, list) and result else result
         detections = []
         for row in page or []:
@@ -595,8 +892,9 @@ def _easyocr(language: str, device: str = "cpu") -> tuple[_Reader, str]:
     if engine is None:
         engine = easyocr.Reader(list(languages), gpu=False)
 
-    def read(image: Path) -> list[str]:
-        rows = engine.readtext(str(image))
+    def read(image: Path | Any) -> list[str]:
+        target = str(image) if isinstance(image, Path) else image
+        rows = engine.readtext(target)
         return _ordered([(box, str(text), float(score)) for box, text, score in rows])
 
     return read, used
@@ -615,6 +913,79 @@ class Engine:
         return f"{self.name} · {'GPU' if self.device == 'gpu' else 'CPU'}"
 
 
+_ENGINE_LOCK = threading.Lock()
+_ENGINE_CACHE: dict[tuple[str, str, str, str, str], Engine] = {}
+
+
+def unload() -> None:
+    """Release cached OCR sessions so GPU/CPU memory can be reclaimed."""
+    with _ENGINE_LOCK:
+        _ENGINE_CACHE.clear()
+    hardware.release_vram()
+
+
+def get_windows_ocr_languages() -> list[str]:
+    """Installed language tags available to Windows Media OCR (ported from CapCap)."""
+    try:
+        import winrt.windows.media.ocr as wmo  # noqa: PLC0415
+
+        return [str(lang.language_tag) for lang in wmo.OcrEngine.available_recognizer_languages]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _winocr(language: str) -> tuple[_Reader, str]:
+    """Windows Media OCR engine via winocr (ported from CapCap)."""
+    try:
+        import winocr  # noqa: PLC0415
+    except ImportError as exc:
+        raise OcrError("winocr is not installed (pip install winocr)") from exc
+
+    available_langs = get_windows_ocr_languages()
+    target = (language or "auto").strip().lower()
+    resolved = "en-US"
+    if not target or target == "auto":
+        for tag in available_langs:
+            if tag.lower().startswith("zh"):
+                resolved = tag
+                break
+        else:
+            if available_langs:
+                resolved = available_langs[0]
+    else:
+        for tag in available_langs:
+            if tag.lower() == target or tag.lower().startswith(target) or target.startswith(tag.lower().split("-")[0]):
+                resolved = tag
+                break
+
+    def read(image: Path | Any) -> list[str]:
+        import numpy as np  # noqa: PLC0415
+
+        if isinstance(image, Path):
+            from PIL import Image  # noqa: PLC0415
+
+            with Image.open(image) as pil_img:
+                arr = np.asarray(pil_img.convert("RGB"))
+        else:
+            arr = np.asarray(image)
+        if arr.size == 0:
+            return []
+        res = winocr.recognize_cv2_sync(arr, lang=resolved)
+        lines: list[str] = []
+        for row in res.get("lines", []) or []:
+            raw = sanitize_ocr_line(str(row.get("text", "")))
+            if raw:
+                cleaned = re.sub(
+                    r"(?<=[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff])\s+(?=[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff])",
+                    "",
+                    raw,
+                )
+                lines.append(cleaned)
+        return lines
+
+    return read, "cpu"
+
+
 def load_engine(
     name: str,
     *,
@@ -623,18 +994,28 @@ def load_engine(
     model_folder: Path | None = None,
     device: str = "auto",
 ) -> Engine:
-    """Build the requested engine, falling back to whatever is installed."""
+    """Build (or reuse) the requested engine, falling back to whatever is installed."""
     chosen = (name or "rapidocr").strip().lower()
+    if chosen in {"windows", "windows_ocr"}:
+        chosen = "winocr"
     if chosen not in ENGINES:
         chosen = "rapidocr"
     order = [chosen, *[item for item in ENGINES if item != chosen]]
     wanted_device = resolve_device(device)
+    cache_key = (chosen, language, profile, str(model_folder or ""), wanted_device)
+
+    with _ENGINE_LOCK:
+        cached = _ENGINE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
     problems: list[str] = []
     for candidate in order:
         try:
             if candidate == "rapidocr":
                 reader, used = _rapidocr(language, profile, model_folder, wanted_device)
+            elif candidate == "winocr":
+                reader, used = _winocr(language)
             elif candidate == "paddleocr":
                 reader, used = _paddleocr(language, wanted_device)
             else:
@@ -643,7 +1024,10 @@ def load_engine(
             problems.append(str(exc))
             continue
         log.info("ocr engine: %s (%s · %s · %s)", candidate, language, profile, used)
-        return Engine(name=candidate, device=used, read=reader)
+        loaded = Engine(name=candidate, device=used, read=reader)
+        with _ENGINE_LOCK:
+            _ENGINE_CACHE[cache_key] = loaded
+        return loaded
     raise OcrError("No OCR engine available: " + "; ".join(problems))
 
 
@@ -826,6 +1210,8 @@ def transcribe(
     work_dir: str | Path,
     report: Reporter = NULL_REPORTER,
     settings: Settings | None = None,
+    start_time: float = 0.0,
+    end_time: float | None = None,
 ) -> list[tuple[float, float, str]]:
     """Read the burned-in subtitles of one video, returning ``(start, end, text)``."""
     settings = provider_config.overlay(settings or get_settings())
@@ -835,26 +1221,6 @@ def transcribe(
 
     fps = float(settings.ocr_fps or DEFAULT_FPS)
     region = provider_config.resolved_region(settings)
-    report(
-        stage="frames",
-        fraction=0.02,
-        message=(
-            f"sampling frames at {fps:g} fps · "
-            f"x {region[0]:g}-{region[2]:g}% · y {region[1]:g}-{region[3]:g}%"
-        ),
-    )
-    try:
-        frames = sample_frames(
-            source,
-            Path(work_dir) / "frames",
-            fps=fps,
-            position=settings.ocr_position or "bottom",
-            band=settings.ocr_band,
-            region=region,
-        )
-    except media_processor.MediaError as exc:
-        raise OcrError(str(exc)) from exc
-
     engine = load_engine(
         settings.ocr_engine,
         language=settings.ocr_language,
@@ -862,21 +1228,73 @@ def transcribe(
         model_folder=managed_models(settings),
         device=settings.ocr_device,
     )
-    report(stage="ocr", fraction=0.05, message=f"{len(frames)} frame(s) · {engine.label}")
-    step = 1.0 / max(fps, 0.1)
+    report(
+        stage="frames",
+        fraction=0.02,
+        message=(
+            f"streaming frames at {fps:g} fps · "
+            f"x {region[0]:g}-{region[2]:g}% · y {region[1]:g}-{region[3]:g}% · {engine.label}"
+        ),
+    )
+
+    try:
+        full_duration = max(media_processor.probe_video(source).duration, 0.1)
+    except media_processor.MediaError as exc:
+        raise OcrError(str(exc)) from exc
+
+    begin = max(0.0, float(start_time or 0.0))
+    finish = min(float(end_time), full_duration) if end_time is not None else full_duration
+    duration = max(finish - begin, 0.1)
 
     observations: list[tuple[float, str]] = []
-    for index, frame in enumerate(frames, start=1):
-        text = " ".join(engine.read(frame))
-        if text:
-            observations.append((round((index - 0.5) * step, 3), text))
-        if index % 20 == 0 or index == len(frames):
-            report(
-                stage="ocr",
-                fraction=0.05 + 0.85 * index / len(frames),
-                message=f"OCR frame {index}/{len(frames)}",
-            )
+    previous_mask: Any = None
+    previous_text = ""
+    total_frames = 0
+    reused_frames = 0
 
+    try:
+        for index, (when, frame) in enumerate(
+            stream_frames(
+                source,
+                fps=fps,
+                position=settings.ocr_position or "bottom",
+                band=settings.ocr_band,
+                region=region,
+                start=begin,
+                end=finish if end_time is not None else None,
+                report=report,
+            ),
+            start=1,
+        ):
+            total_frames = index
+            mask = text_mask(frame)
+            if frame_unchanged(mask, previous_mask) and previous_text:
+                text = previous_text
+                reused_frames += 1
+            else:
+                text = " ".join(engine.read(frame))
+            previous_mask, previous_text = mask, text
+
+            if text:
+                observations.append((when, text))
+            if index % 15 == 0:
+                report(
+                    stage="ocr",
+                    fraction=min(0.05 + 0.85 * ((when - begin) / duration), 0.92),
+                    message=f"OCR {when:.1f}/{finish:.1f}s (skipped {reused_frames}/{total_frames})",
+                )
+    except media_processor.MediaError as exc:
+        raise OcrError(str(exc)) from exc
+
+    if total_frames == 0:
+        raise OcrError("ffmpeg produced no frames - is this a video file?")
+
+    log.info(
+        "ocr streamed %s frame(s), reused %s unchanged mask(s) (%.0f%%)",
+        total_frames,
+        reused_frames,
+        100.0 * reused_frames / max(total_frames, 1),
+    )
     cues = merge_observations(observations, fps=fps)
     report(stage="transcribe", fraction=0.95, message=f"OCR found {len(cues)} line(s)")
     return cues
@@ -973,16 +1391,40 @@ def read_windows(
         for position, (start, end) in enumerate(wanted, start=1):
             instants = _gap_instants(start, end, samples)
             seen: list[tuple[float, str]] = []
-            for index, when in enumerate(instants):
-                frame = grab_frame(
+            span = max(end - start, 0.2)
+            window_fps = max(len(instants) / span, 1.0)
+            try:
+                prev_mask: Any = None
+                prev_line = ""
+                for when, frame in stream_frames(
                     source,
-                    folder / f"gap{position:03d}_{index:02d}.png",
-                    when,
+                    fps=window_fps,
                     position=settings.ocr_position or "bottom",
                     band=settings.ocr_band,
                     region=region,
-                )
-                seen.append((when, _one_script(" ".join(engine.read(frame)), cjk=cjk)))
+                    start=start,
+                    end=end,
+                    report=report,
+                ):
+                    mask = text_mask(frame)
+                    if frame_unchanged(mask, prev_mask) and prev_line:
+                        line = prev_line
+                    else:
+                        line = _one_script(" ".join(engine.read(frame)), cjk=cjk)
+                    prev_mask, prev_line = mask, line
+                    seen.append((when, line))
+            except (OcrError, media_processor.MediaError):
+                seen = []
+                for index, when in enumerate(instants):
+                    frame_path = grab_frame(
+                        source,
+                        folder / f"gap{position:03d}_{index:02d}.png",
+                        when,
+                        position=settings.ocr_position or "bottom",
+                        band=settings.ocr_band,
+                        region=region,
+                    )
+                    seen.append((when, _one_script(" ".join(engine.read(frame_path)), cjk=cjk)))
             text, candidates = best_reading(seen)
             # The winner is only a cue when more than one frame saw it: a single
             # frame reads a chandelier as letters happily, a cue stays on screen.
@@ -1101,6 +1543,45 @@ def read_cue(
     )
 
 
+def extract_region_text(
+    video: str | Path,
+    *,
+    when: float,
+    region: tuple[float, float, float, float],
+    work_dir: str | Path,
+    language: str = "auto",
+    settings: Settings | None = None,
+) -> tuple[str, str, str]:
+    """Standalone OCR Translator capture (ported from CapCap).
+
+    Reads visible text inside ``region`` (percent ``left, top, right, bottom``)
+    at ``when`` seconds without modifying the project transcript or timeline.
+    Returns ``(text, engine_name, device)``.
+    """
+    settings = provider_config.overlay(settings or get_settings())
+    source = Path(video)
+    if not source.is_file():
+        raise OcrError(f"Video not found: {source}")
+
+    lang = (language or settings.ocr_language or "auto").strip().lower()
+    engine = load_engine(
+        settings.ocr_engine,
+        language=lang,
+        profile=settings.ocr_profile,
+        model_folder=managed_models(settings),
+        device=settings.ocr_device,
+    )
+    target = Path(work_dir) / "ocr_region.png"
+    try:
+        frame = grab_frame(source, target, max(0.0, float(when)), region=region)
+        lines = engine.read(frame)
+    except media_processor.MediaError as exc:
+        raise OcrError(str(exc)) from exc
+    finally:
+        target.unlink(missing_ok=True)
+    return "\n".join(lines).strip(), engine.name, engine.device
+
+
 __all__ = [
     "DEVICES",
     "ENGINES",
@@ -1111,6 +1592,9 @@ __all__ = [
     "WindowReading",
     "best_reading",
     "cue_offsets",
+    "extract_region_text",
+    "frame_unchanged",
+    "get_windows_ocr_languages",
     "grab_frame",
     "load_engine",
     "managed_models",
@@ -1124,5 +1608,9 @@ __all__ = [
     "resolve_device",
     "runtime_info",
     "sample_frames",
+    "sanitize_ocr_line",
+    "stream_frames",
+    "text_mask",
     "transcribe",
+    "unload",
 ]

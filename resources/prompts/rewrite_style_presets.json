@@ -1,0 +1,34 @@
+[
+  {
+    "label": "Rút gọn tối đa (Max Concise - Shorts/Reels)",
+    "instruction": "Make the Vietnamese extremely concise, tight, and fast to read in 1-2 seconds on mobile screens. Cut all unnecessary filler words while preserving key meaning and correct address forms."
+  },
+  {
+    "label": "Kể chuyện / Review phim (Storytelling Recap)",
+    "instruction": "Make the Vietnamese sound like an engaging film recap / storyteller voice: smooth flow, emotionally vivid, natural narrative transitions, maintaining character tension."
+  },
+  {
+    "label": "Kịch tính / Giật gân (Dramatic & Punchy)",
+    "instruction": "Make the Vietnamese punchy, tense, and dramatic with sharp contrasts and high-impact phrasing, perfect for dramatic conflict scenes, cliffhangers, and short dramas."
+  },
+  {
+    "label": "Khẩu ngữ đời thường (Casual & Trendy)",
+    "instruction": "Make the Vietnamese sound modern, conversational, natural, and trendy like a creator on TikTok or social media, avoiding textbook, stiff, or overly literary phrasing."
+  },
+  {
+    "label": "Lồng tiếng nhịp nhàng (Smooth Dubbing Flow)",
+    "instruction": "Make the Vietnamese flow smoothly, rhythmic, and natural to pronounce for voice dubbing and TTS, avoiding tongue-twisters, awkward syllable clusters, or unnatural breath breaks."
+  },
+  {
+    "label": "Thuyết phục / Bán hàng (Sales & Commercial)",
+    "instruction": "Make the Vietnamese persuasive, benefit-driven, smooth, and compelling for product showcases, marketing videos, or sales pitches without exaggerating source facts."
+  },
+  {
+    "label": "Phụ đề chuẩn mực (Natural Subtitles)",
+    "instruction": "Make the Vietnamese natural, balanced, culturally adapted, and very pleasant to read as standard on-screen video subtitles."
+  },
+  {
+    "label": "Trang trọng / Chuyên nghiệp (Formal & Professional)",
+    "instruction": "Make the Vietnamese polished, formal, authoritative, and grammatically precise, suitable for business presentations, documentaries, and professional interviews."
+  }
+]

@@ -194,3 +194,73 @@ def test_ocr_frame_returns_the_reading_without_touching_the_timeline(
     assert (payload["engine"], payload["device"]) == ("rapidocr", "cpu")
     assert payload["region"] == [0.0, 55.0, 100.0, 100.0]
     assert payload["frame_path"] is None
+
+
+# ---------------------------------------------------------------------------
+# Streaming & text-mask reuse (ported from 01_TachSub_Studio)
+# ---------------------------------------------------------------------------
+def _subtitle_frame(glyph_col: int = 20, width: int = 120) -> object:
+    """Synthetic BGR frame: dark background (50) with a bright subtitle band (240)."""
+    import numpy as np
+
+    frame = np.full((48, 200, 3), 50, dtype=np.uint8)
+    frame[16:32, glyph_col : glyph_col + width] = 240
+    return frame
+
+
+def test_text_mask_and_frame_unchanged_detect_static_subtitle_frames() -> None:
+    import numpy as np
+
+    first = ocr_service.text_mask(_subtitle_frame(20, 100))
+    same = ocr_service.text_mask(_subtitle_frame(20, 100))
+    different = ocr_service.text_mask(_subtitle_frame(60, 40))
+    blank = ocr_service.text_mask(np.full((48, 200, 3), 120, dtype=np.uint8))
+
+    assert int(np.count_nonzero(first)) > 0
+    assert ocr_service.frame_unchanged(same, first) is True
+    assert ocr_service.frame_unchanged(different, first) is False
+    assert ocr_service.frame_unchanged(blank, blank) is False
+
+
+def test_transcribe_streams_frames_and_skips_unchanged_subtitle_masks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"00")
+    calls: list[int] = []
+    cue_a = _subtitle_frame(20, 100)
+    cue_b = _subtitle_frame(40, 60)
+
+    def fake_stream(*_args, **_kwargs):
+        # 3 identical frames of cue A, then 2 identical frames of cue B.
+        yield 0.167, cue_a
+        yield 0.500, cue_a
+        yield 0.833, cue_a
+        yield 1.167, cue_b
+        yield 1.500, cue_b
+
+    def fake_read(_frame):
+        calls.append(1)
+        return ["Xin chào" if len(calls) == 1 else "Tạm biệt"]
+
+    monkeypatch.setattr(provider_config, "overlay", lambda settings=None: settings or Settings())
+    monkeypatch.setattr(
+        ocr_service.media_processor,
+        "probe_video",
+        lambda path: ocr_service.media_processor.VideoInfo(
+            path=Path(path), duration=2.0, width=1280, height=720, fps=30.0, has_audio=True
+        ),
+    )
+    monkeypatch.setattr(ocr_service, "stream_frames", fake_stream)
+    monkeypatch.setattr(
+        ocr_service,
+        "load_engine",
+        lambda *_a, **_k: ocr_service.Engine(name="rapidocr", device="gpu", read=fake_read),
+    )
+
+    cues = ocr_service.transcribe(video, work_dir=tmp_path / "work", settings=Settings(ocr_fps=3.0))
+
+    # 5 frames total, but only 2 distinct subtitle masks -> reader called twice!
+    assert len(calls) == 2
+    assert [text for _start, _end, text in cues] == ["Xin chào", "Tạm biệt"]
+

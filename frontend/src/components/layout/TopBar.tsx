@@ -1,13 +1,16 @@
-import { Cpu, FilePlus2, Loader2, Save, Upload, X } from "lucide-react";
+import { ChevronDown, Cpu, FilePlus2, ListChecks, Loader2, Music, Save, Upload, Wrench, X } from "lucide-react";
+import { useState } from "react";
 
+import { MediaToolsModal } from "@/components/modals/MediaToolsModal";
+import { QueueModal } from "@/components/modals/QueueModal";
 import { ProjectMenu } from "@/components/project/ProjectMenu";
 import { formatPercent } from "@/lib/format";
 import { pickVideo } from "@/lib/media";
 import { cancelJob } from "@/lib/api";
 import { saveCurrentProject } from "@/lib/project";
-import { openVideo, runExport } from "@/lib/tasks";
+import { openVideo, runExport, runExportAudio } from "@/lib/tasks";
 import { useEditor } from "@/store/editorStore";
-import type { Aspect } from "@/types/editor";
+import type { Aspect, QualityProfile } from "@/types/editor";
 
 const ASPECTS: Array<{ value: Aspect; label: string }> = [
   { value: "9:16", label: "9:16" },
@@ -28,6 +31,12 @@ export function TopBar() {
   const projectPath = useEditor((state) => state.projectPath);
   const projectDirty = useEditor((state) => state.projectDirty);
   const segmentCount = useEditor((state) => state.segments.length);
+  const qualityProfile = useEditor((state) => state.qualityProfile);
+  const useNvenc = useEditor((state) => state.useNvenc);
+
+  const [showQueue, setShowQueue] = useState(false);
+  const [showMediaTools, setShowMediaTools] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
 
   const busy = Object.keys(pending).length > 0 || job?.state === "running";
   const importing = Boolean(pending.import);
@@ -67,6 +76,24 @@ export function TopBar() {
         {projectDirty && projectPath && (
           <span className="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-400" title="Có thay đổi chưa lưu" />
         )}
+      </button>
+
+      <button
+        className="btn-ghost"
+        onClick={() => setShowQueue(true)}
+        title="Hàng đợi xử lý hàng loạt (Performance Queue)"
+      >
+        <ListChecks size={12} />
+        Hàng đợi
+      </button>
+
+      <button
+        className="btn-ghost"
+        onClick={() => setShowMediaTools(true)}
+        title="Công cụ Media FFmpeg: Cắt, Ghép, Tách âm thanh, Lồng nhạc"
+      >
+        <Wrench size={12} />
+        Công cụ Media
       </button>
 
       <div className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-[11px] text-slate-500">
@@ -121,16 +148,94 @@ export function TopBar() {
         </div>
       ) : null}
 
-      <button className="btn-primary" onClick={() => void runExport()} disabled={!source || busy}>
-        <Upload size={12} />
-        Xuất video
-      </button>
+      <div className="relative flex items-center">
+        <button className="btn-primary rounded-r-none" onClick={() => void runExport()} disabled={!source || busy}>
+          <Upload size={12} />
+          Xuất video
+        </button>
+        <button
+          className="btn-primary rounded-l-none border-l border-black/20 !px-1.5"
+          onClick={() => setShowExportMenu((v) => !v)}
+          title="Tuỳ chọn chất lượng xuất & Xuất âm thanh rời (Voice / BGM / Mix)"
+        >
+          <ChevronDown size={11} />
+        </button>
+
+        {showExportMenu && (
+          <div className="absolute right-0 top-full z-40 mt-1 w-56 space-y-2 rounded-lg border border-border bg-surface-2 p-2.5 text-xs shadow-panel">
+            <div className="space-y-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                Chất lượng xuất MP4
+              </span>
+              <select
+                className="field w-full !py-1 !text-[11px]"
+                value={qualityProfile}
+                onChange={(e) => update({ qualityProfile: e.target.value as QualityProfile })}
+              >
+                <option value="high">Cao (CRF 20 · Chuẩn)</option>
+                <option value="balanced">Cân bằng (CRF 22 · Nhanh)</option>
+                <option value="low">Nhẹ / Xem nhanh (CRF 26)</option>
+              </select>
+              <label className="flex items-center gap-1.5 pt-0.5 text-[11px] text-slate-400">
+                <input
+                  type="checkbox"
+                  checked={useNvenc}
+                  onChange={(e) => update({ useNvenc: e.target.checked })}
+                />
+                Tăng tốc phần cứng NVENC (GPU)
+              </label>
+            </div>
+
+            <div className="space-y-1 border-t border-border pt-2">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                Xuất âm thanh độc lập (.WAV)
+              </span>
+              <button
+                className="btn-ghost w-full justify-start !py-1 !text-[11px]"
+                disabled={!hasDub || busy}
+                onClick={() => {
+                  setShowExportMenu(false);
+                  void runExportAudio("voice");
+                }}
+              >
+                <Music size={11} />
+                Xuất riêng Giọng đọc (Voice)
+              </button>
+              <button
+                className="btn-ghost w-full justify-start !py-1 !text-[11px]"
+                disabled={!source || busy}
+                onClick={() => {
+                  setShowExportMenu(false);
+                  void runExportAudio("bgm");
+                }}
+              >
+                <Music size={11} />
+                Xuất riêng Nhạc nền (BGM)
+              </button>
+              <button
+                className="btn-ghost w-full justify-start !py-1 !text-[11px]"
+                disabled={(!source && !hasDub) || busy}
+                onClick={() => {
+                  setShowExportMenu(false);
+                  void runExportAudio("mix");
+                }}
+              >
+                <Music size={11} />
+                Xuất bản trộn (Voice + BGM Mix)
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
 
       {hasDub && (
         <span className="rounded bg-track-dubbed/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
           có lồng tiếng
         </span>
       )}
+
+      {showQueue && <QueueModal onClose={() => setShowQueue(false)} />}
+      {showMediaTools && <MediaToolsModal onClose={() => setShowMediaTools(false)} />}
     </header>
   );
 }

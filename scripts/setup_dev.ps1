@@ -28,6 +28,17 @@ $backend = Join-Path $root "backend"
 $venv = Join-Path $root ".venv"
 $python = Join-Path $venv "Scripts\python.exe"
 
+# Keep temp and caches inside project folder to avoid bloating C: drive
+$tmpDir = Join-Path $root ".tmp"
+$cacheDir = Join-Path $root ".cache"
+New-Item -ItemType Directory -Force -Path $tmpDir, $cacheDir | Out-Null
+$env:TEMP = $tmpDir
+$env:TMP = $tmpDir
+$env:PIP_NO_CACHE_DIR = "1"
+$env:npm_config_cache = Join-Path $cacheDir "npm"
+$env:HF_HOME = Join-Path $cacheDir "huggingface"
+$env:TORCH_HOME = Join-Path $cacheDir "torch"
+
 function Write-Step {
     param([string]$Text)
     Write-Host ""
@@ -417,7 +428,7 @@ else {
     Write-Ok "created frontend/.env.local"
 }
 
-$dataDir = Join-Path $env:APPDATA "ShortVideoAI"
+$dataDir = Join-Path $cacheDir "ShortVideoAI"
 foreach ($sub in @("models", "models\separator", "cache", "projects", "renders", "logs", "temp")) {
     $null = New-Item -ItemType Directory -Force -Path (Join-Path $dataDir $sub)
 }

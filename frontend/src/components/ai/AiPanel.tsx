@@ -1,22 +1,32 @@
 import {
   AudioLines,
   Captions,
+  FileUp,
   KeyRound,
   Languages,
   Loader2,
   PlayCircle,
   Sparkles,
   TriangleAlert,
+  Users,
   Volume2,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { previewVoice, saveSettings } from "@/lib/api";
+import { PronounReviewDialog } from "@/components/ai/PronounReviewDialog";
+import { fetchTranslationPresets, previewVoice, saveSettings } from "@/lib/api";
 import { clamp } from "@/lib/format";
 import { toAssetUrl } from "@/lib/media";
-import { runDub, runTranscribe, runTranslate } from "@/lib/tasks";
+import { runDub, runImportSrtText, runTranscribe, runTranslate } from "@/lib/tasks";
 import { DEFAULT_VOICES, useEditor, type SidebarTab } from "@/store/editorStore";
-import type { AudioMode, SttProvider, TranslateProvider, TtsProvider } from "@/types/editor";
+import type {
+  AudioMode,
+  SttProvider,
+  SubtitlePresentationMode,
+  TranslateProvider,
+  TranslationPreset,
+  TtsProvider,
+} from "@/types/editor";
 
 const LANGUAGES = [
   { value: "auto", label: "Tự nhận" },
@@ -49,14 +59,19 @@ const VOICES: Record<TtsProvider, Array<{ value: string; label: string }>> = {
   ],
   omnivoice: [{ value: "auto", label: "Tự động (model chọn giọng)" }],
   voicestudio: [{ value: "alloy", label: "alloy (mặc định của server)" }],
+  elevenlabs: [
+    { value: "21m00Tcm4TlvDq8ikWAM", label: "Rachel (ElevenLabs)" },
+    { value: "pNInz6obpgDQGcFmaJgB", label: "Adam (ElevenLabs)" },
+  ],
 };
 
 /** Free-text voices: a described voice, a sample path or a server voice id. */
-const FREE_VOICE: TtsProvider[] = ["omnivoice", "voicestudio"];
+const FREE_VOICE: TtsProvider[] = ["omnivoice", "voicestudio", "elevenlabs"];
 
 const VOICE_PLACEHOLDER: Partial<Record<TtsProvider, string>> = {
   omnivoice: "auto · design:nữ, giọng trầm, chậm · clone:D:\\giong.wav",
   voicestudio: "alloy",
+  elevenlabs: "Voice ID ElevenLabs (vd: 21m00Tcm4TlvDq8ikWAM)",
 };
 
 /** Providers that accept a speaking rate. */
@@ -85,11 +100,36 @@ export function AiPanel() {
   const duckGain = useEditor((state) => state.duckGain);
   const audioMode = useEditor((state) => state.audioMode);
   const ocrFill = useEditor((state) => state.ocrFill);
+  const dedupEnabled = useEditor((state) => state.dedupEnabled);
+  const hallucinationFilter = useEditor((state) => state.hallucinationFilter);
+  const diarize = useEditor((state) => state.diarize);
+  const translatePreset = useEditor((state) => state.translatePreset);
+  const autoContext = useEditor((state) => state.autoContext);
+  const presentationMode = useEditor((state) => state.presentationMode);
+  const speakerVoices = useEditor((state) => state.speakerVoices);
+  const trimSilence = useEditor((state) => state.trimSilence);
   const settings = useEditor((state) => state.settings);
   const setSettings = useEditor((state) => state.setSettings);
   const update = useEditor((state) => state.update);
 
   const [previewing, setPreviewing] = useState(false);
+  const [presets, setPresets] = useState<TranslationPreset[]>([]);
+  const [showPronounDialog, setShowPronounDialog] = useState(false);
+  const srtInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    void fetchTranslationPresets()
+      .then((list) => setPresets(list))
+      .catch(() => undefined);
+  }, []);
+
+  const speakers = useMemo(() => {
+    const set = new Set<string>();
+    segments.forEach((seg) => {
+      if (seg.speaker) set.add(seg.speaker);
+    });
+    return Array.from(set);
+  }, [segments]);
 
   const busy = Object.keys(pending).length > 0;
   const canRun = Boolean(source?.path) && !busy;
@@ -258,6 +298,21 @@ export function AiPanel() {
               onChange={(value) => update({ ocrFill: value })}
               label="Đọc lại bằng OCR đoạn có tiếng mà thiếu chữ"
             />
+            <Toggle
+              checked={dedupEnabled}
+              onChange={(value) => update({ dedupEnabled: value })}
+              label="Gộp câu trùng lặp ở biên đoạn (CapCap ASR Dedup)"
+            />
+            <Toggle
+              checked={hallucinationFilter}
+              onChange={(value) => update({ hallucinationFilter: value })}
+              label="Lọc câu ảo giác Whisper ở khoảng lặng"
+            />
+            <Toggle
+              checked={diarize}
+              onChange={(value) => update({ diarize: value })}
+              label="Phân biệt người nói (Speaker Diarization)"
+            />
             {ocrFill && (
               <Hint tone="info" icon={<TriangleAlert size={10} />}>
                 Sau khi nhận dạng giọng nói, engine tìm những quãng vẫn có âm thanh nhưng chưa ra
@@ -272,10 +327,38 @@ export function AiPanel() {
 
         <KeyNotice provider={sttProvider} />
 
-        <button className="btn-primary w-full" onClick={() => void runTranscribe()} disabled={!canRun}>
-          {pending.transcribe ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-          {segments.length ? "Tạo lại phụ đề" : "Tạo phụ đề tự động"}
-        </button>
+        <div className="flex gap-1.5">
+          <button className="btn-primary flex-1" onClick={() => void runTranscribe()} disabled={!canRun}>
+            {pending.transcribe ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+            {segments.length ? "Tạo lại phụ đề" : "Tạo phụ đề tự động"}
+          </button>
+          <button
+            className="btn-ghost px-2.5"
+            title="Nhập tệp phụ đề .SRT có sẵn từ máy"
+            onClick={() => srtInputRef.current?.click()}
+          >
+            <FileUp size={12} />
+            SRT
+          </button>
+          <input
+            ref={srtInputRef}
+            type="file"
+            accept=".srt"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = () => {
+                if (typeof reader.result === "string") {
+                  void runImportSrtText(reader.result, useEditor.getState().activeSubtitleTrack);
+                }
+              };
+              reader.readAsText(file);
+              e.target.value = "";
+            }}
+          />
+        </div>
       </Section>
 
       {/* 2 — Translation ---------------------------------------------------- */}
@@ -302,11 +385,63 @@ export function AiPanel() {
             >
               <option value="local">Offline (GGUF trên máy)</option>
               <option value="gemini">Gemini API</option>
+              <option value="deepseek">DeepSeek API</option>
               <option value="openai">OpenAI API</option>
+              <option value="ollama">Ollama (Local Server)</option>
               <option value="google">Google Dịch (miễn phí)</option>
               <option value="bing">Bing Dịch (miễn phí)</option>
             </select>
           </Labelled>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <Labelled label="Thể loại (Preset CapCap)">
+            <select
+              className="field"
+              value={translatePreset}
+              onChange={(event) => update({ translatePreset: event.target.value })}
+            >
+              {presets.length ? (
+                presets.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))
+              ) : (
+                <option value="general_default">Mặc định (Đa dụng)</option>
+              )}
+            </select>
+          </Labelled>
+          <Labelled label="Hiển thị phụ đề">
+            <select
+              className="field"
+              value={presentationMode}
+              onChange={(event) =>
+                update({ presentationMode: event.target.value as SubtitlePresentationMode })
+              }
+            >
+              <option value="single">Có phụ đề (Đơn ngữ)</option>
+              <option value="bilingual">Song ngữ (TS1 + TS2)</option>
+              <option value="none">Không phụ đề (Chỉ lồng tiếng)</option>
+            </select>
+          </Labelled>
+        </div>
+
+        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
+          <Toggle
+            checked={autoContext}
+            onChange={(value) => update({ autoContext: value })}
+            label="Giữ mạch xưng hô liên tục (Rolling Ledger)"
+          />
+          <button
+            className="btn-ghost !px-2 !py-0.5 !text-[10px]"
+            onClick={() => setShowPronounDialog(true)}
+            disabled={!segments.length}
+            title="Phân tích kịch bản & duyệt đại từ xưng hô nhân vật trước khi dịch"
+          >
+            <Users size={11} />
+            Duyệt xưng hô
+          </button>
         </div>
 
         {(translateProvider === "google" || translateProvider === "bing") && (
@@ -357,6 +492,7 @@ export function AiPanel() {
               }}
             >
               <option value="capcut">CapCut (cloud, giọng Việt)</option>
+              <option value="elevenlabs">ElevenLabs (cloud, đa ngôn ngữ)</option>
               <option value="omnivoice">OmniVoice (offline, 600+ ngôn ngữ)</option>
               <option value="voicestudio">VoiceStudio (server nội bộ)</option>
             </select>
@@ -438,6 +574,40 @@ export function AiPanel() {
             label="Dùng bản dịch để đọc"
           />
           <Toggle
+            checked={trimSilence}
+            onChange={(value) => update({ trimSilence: value })}
+            label="Cắt khoảng lặng đầu/cuối câu TTS (-60dB)"
+          />
+          {speakers.length > 0 && (
+            <div className="space-y-1 rounded border border-border bg-surface-1 p-2">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                Gán giọng theo người nói ({speakers.length})
+              </div>
+              {speakers.map((spk) => (
+                <div key={spk} className="flex items-center gap-2">
+                  <span className="w-20 shrink-0 truncate font-mono text-[10px] text-brand">
+                    {spk}
+                  </span>
+                  <select
+                    className="field flex-1 !py-0.5 !text-[10px]"
+                    value={speakerVoices[spk] ?? ttsVoice}
+                    onChange={(e) =>
+                      update({
+                        speakerVoices: { ...speakerVoices, [spk]: e.target.value },
+                      })
+                    }
+                  >
+                    {(VOICES[ttsProvider] ?? VOICES.capcut).map((v) => (
+                      <option key={v.value} value={v.value}>
+                        {v.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+          )}
+          <Toggle
             checked={keepOriginalAudio}
             onChange={(value) => update({ keepOriginalAudio: value })}
             label="Giữ âm thanh gốc dưới giọng lồng tiếng"
@@ -504,6 +674,10 @@ export function AiPanel() {
           </div>
         )}
       </Section>
+
+      {showPronounDialog && (
+        <PronounReviewDialog onClose={() => setShowPronounDialog(false)} />
+      )}
     </div>
   );
 }

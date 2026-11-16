@@ -12,6 +12,7 @@ from app.api.routes import (
     media,
     models,
     project,
+    queue,
     render,
     settings,
     subtitles,
@@ -29,6 +30,7 @@ api_router.include_router(subtitles.router)
 api_router.include_router(dubbing.router)
 api_router.include_router(render.router)
 api_router.include_router(capcut_export.router)
+api_router.include_router(queue.router)
 api_router.include_router(jobs.router)
 
 __all__ = ["api_router"]

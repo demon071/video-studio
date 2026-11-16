@@ -6,16 +6,21 @@ import type {
   AiPackStatus,
   Aspect,
   AudioMode,
+  ContextAnalyzeResult,
   DubbingResult,
   HardwareProfile,
   JobState,
   ModelStatus,
+  QualityProfile,
   SettingsDocument,
   SttProvider,
+  StylePresetItem,
+  SubtitlePresentationMode,
   SubtitleSegment,
   SubtitleStyle,
   TranslateProvider,
   TtsProvider,
+  VisualLayer,
 } from "@/types/editor";
 
 export interface SourceClip {
@@ -154,6 +159,35 @@ interface EditorState {
   keepOriginalAudio: boolean;
   /** Level of the original track while the dub speaks (0 = mute, 1 = untouched). */
   duckGain: number;
+  voiceGain: number;
+  // CapCap v9.0.1 ASR & Diarization settings
+  dedupEnabled: boolean;
+  dedupSimilarity: number;
+  hallucinationFilter: boolean;
+  hallucinationSilence: number;
+  diarize: boolean;
+  numSpeakers: number;
+  // CapCap Translation & Context settings
+  translatePreset: string;
+  autoContext: boolean;
+  contextGuidance: string;
+  contextResult: ContextAnalyzeResult | null;
+  // CapCap Bilingual & Style Presets
+  presentationMode: SubtitlePresentationMode;
+  secondarySegments: SubtitleSegment[];
+  secondaryStyle: SubtitleStyle;
+  activeSubtitleTrack: 1 | 2;
+  stylePresets: StylePresetItem[];
+  // CapCap Multi-Speaker TTS & Audio Policy
+  speakerVoices: Record<string, string>;
+  trimSilence: boolean;
+  // CapCap Visual Layers & Render settings
+  layers: VisualLayer[];
+  selectedLayerId: string | null;
+  flipHorizontal: boolean;
+  qualityProfile: QualityProfile;
+  useNvenc: boolean;
+  selectionRange: [number, number] | null;
   // actions
   update: (patch: Partial<EditorState>) => void;
   setSource: (source: SourceClip | null) => void;
@@ -165,8 +199,13 @@ interface EditorState {
   setSettings: (settings: SettingsDocument) => void;
   upsertSegment: (segment: SubtitleSegment) => void;
   patchSegment: (index: number, patch: Partial<SubtitleSegment>) => void;
+  restoreSegmentTiming: () => void;
   /** Merge a change into the caption look (marks the document as unsaved). */
   setSubtitleStyle: (patch: Partial<SubtitleStyle>) => void;
+  setSecondaryStyle: (patch: Partial<SubtitleStyle>) => void;
+  addLayer: (layer: VisualLayer) => void;
+  patchLayer: (id: string, patch: Partial<VisualLayer>) => void;
+  removeLayer: (id: string) => void;
   removeSegment: (index: number) => void;
   setPlayhead: (seconds: number, options?: { seek?: boolean }) => void;
   setPlaying: (playing: boolean) => void;
@@ -215,10 +254,40 @@ const TRANSIENT_KEYS = new Set<string>([
 const DEFAULT_VOICES: Record<TtsProvider, string> = {
   // CapCut voice *type* — the backend maps it to the cloud resource id.
   capcut: "BV421_vivn_streaming",
+  elevenlabs: "21m00Tcm4TlvDq8ikWAM",
   // OmniVoice: `auto` lets the model pick; a description or `clone:<wav>` also work.
   omnivoice: "auto",
   voicestudio: "alloy",
 };
+
+const DEFAULT_SECONDARY_STYLE: SubtitleStyle = {
+  ...DEFAULT_SUBTITLE_STYLE,
+  size: 0.78,
+  color: "#FFE082",
+  margin_v: 15,
+};
+
+function loadSavedStylePresets(): StylePresetItem[] {
+  try {
+    const raw = window.localStorage.getItem("sva_style_presets");
+    if (raw) return JSON.parse(raw) as StylePresetItem[];
+  } catch {
+    // ignore storage errors
+  }
+  return [
+    { id: "default", name: "Mặc định (Vàng/Trắng)", style: DEFAULT_SUBTITLE_STYLE },
+    {
+      id: "drama_gold",
+      name: "Phim ngắn Vàng rực",
+      style: { ...DEFAULT_SUBTITLE_STYLE, color: "#FFD54F", outline: 1.5, background: false },
+    },
+    {
+      id: "clean_box",
+      name: "Hộp đen tối giản",
+      style: { ...DEFAULT_SUBTITLE_STYLE, outline: 0, background: true, background_opacity: 0.65 },
+    },
+  ];
+}
 
 export const useEditor = create<EditorState>((set, get) => ({
   projectPath: null,
@@ -270,6 +339,30 @@ export const useEditor = create<EditorState>((set, get) => ({
   // 0.35 leaves the music and ambience of the original audible without
   // competing with the voice on top of it; the sidechain dips it further.
   duckGain: 0.35,
+  voiceGain: 1.0,
+  dedupEnabled: true,
+  dedupSimilarity: 0.82,
+  hallucinationFilter: true,
+  hallucinationSilence: 1.2,
+  diarize: false,
+  numSpeakers: 0,
+  translatePreset: "general_default",
+  autoContext: true,
+  contextGuidance: "",
+  contextResult: null,
+  presentationMode: "single",
+  secondarySegments: [],
+  secondaryStyle: DEFAULT_SECONDARY_STYLE,
+  activeSubtitleTrack: 1,
+  stylePresets: loadSavedStylePresets(),
+  speakerVoices: {},
+  trimSilence: false,
+  layers: [],
+  selectedLayerId: null,
+  flipHorizontal: false,
+  qualityProfile: "high",
+  useNvenc: false,
+  selectionRange: null,
 
   update: (patch) =>
     set(() => {
@@ -372,6 +465,39 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   setSubtitleStyle: (patch) =>
     set((state) => ({ subtitleStyle: { ...state.subtitleStyle, ...patch }, projectDirty: true })),
+
+  setSecondaryStyle: (patch) =>
+    set((state) => ({ secondaryStyle: { ...state.secondaryStyle, ...patch }, projectDirty: true })),
+
+  restoreSegmentTiming: () =>
+    set((state) => ({
+      segments: state.segments.map((seg) => ({
+        ...seg,
+        start: seg.original_start ?? seg.start,
+        end: seg.original_end ?? seg.end,
+      })),
+      projectDirty: true,
+    })),
+
+  addLayer: (layer) =>
+    set((state) => ({
+      layers: [...state.layers, layer],
+      selectedLayerId: layer.id,
+      projectDirty: true,
+    })),
+
+  patchLayer: (id, patch) =>
+    set((state) => ({
+      layers: state.layers.map((l) => (l.id === id ? { ...l, ...patch } : l)),
+      projectDirty: true,
+    })),
+
+  removeLayer: (id) =>
+    set((state) => ({
+      layers: state.layers.filter((l) => l.id !== id),
+      selectedLayerId: state.selectedLayerId === id ? null : state.selectedLayerId,
+      projectDirty: true,
+    })),
 
   removeSegment: (index) =>
     set((state) => {

@@ -13,7 +13,7 @@
     "setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup_dev.ps1",
     "check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check_env.ps1",
     "dev": "concurrently -k -n BACKEND,APP -c cyan,magenta \"npm:dev:backend\" \"npm:dev:app\"",
-    "dev:app": "npm run dev --workspace frontend",
+    "dev:app": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev_app.ps1",
     "dev:web": "npm run dev:web --workspace frontend",
     "dev:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev_backend.ps1",
     "build": "npm run build --workspace frontend",

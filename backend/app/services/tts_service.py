@@ -25,6 +25,7 @@ from app.core.progress import NULL_REPORTER, Reporter
 from app.schemas.subtitle import DubbingSegmentReport, SubtitleSegment
 from app.services import (
     capcut_client,
+    elevenlabs_tts,
     media_processor,
     model_manager,
     omnivoice_tts,
@@ -101,6 +102,13 @@ def _synth_capcut(text: str, target: Path, *, voice: str, rate: str | None, sett
     return target
 
 
+def _synth_elevenlabs(text: str, target: Path, *, voice: str, settings: Settings) -> Path:
+    try:
+        return elevenlabs_tts.synthesize(text, target, voice=voice, settings=settings)
+    except elevenlabs_tts.ElevenLabsError as exc:
+        raise TtsError(str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Public primitives
 # ---------------------------------------------------------------------------
@@ -110,6 +118,8 @@ def resolve_voice(provider: str, voice: str | None, settings: Settings) -> str:
         return omnivoice_tts.resolve_voice(voice, settings)
     if chosen == "voicestudio":
         return voicestudio_tts.resolve_voice(voice, settings)
+    if chosen == "elevenlabs":
+        return elevenlabs_tts.resolve_voice(voice, settings)
     if chosen == "capcut":
         return (voice or settings.capcut_voice or capcut_client.DEFAULT_TTS_VOICE).strip()
     if voice:
@@ -135,6 +145,8 @@ def synthesize(
 
     if chosen == "capcut":
         return _synth_capcut(text, target.with_suffix(".mp3"), voice=speaker, rate=rate, settings=settings)
+    if chosen == "elevenlabs":
+        return _synth_elevenlabs(text, target.with_suffix(".mp3"), voice=speaker, settings=settings)
     if chosen == "omnivoice":
         return _synth_omnivoice(text, target.with_suffix(".wav"), voice=speaker, settings=settings)
     if chosen == "voicestudio":
@@ -143,7 +155,7 @@ def synthesize(
 
 
 def _raw_extension(provider: str) -> str:
-    return "mp3" if (provider or DEFAULT_PROVIDER).lower() == "capcut" else "wav"
+    return "mp3" if (provider or DEFAULT_PROVIDER).lower() in {"capcut", "elevenlabs"} else "wav"
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +301,7 @@ def dub(
     work_dir: str | Path,
     provider: str | None = None,
     voice: str | None = None,
+    speaker_voices: dict[str, str] | None = None,
     rate: str | None = None,
     use_translation: bool = True,
     timing_rewrite: bool = True,
@@ -318,6 +331,7 @@ def dub(
     reports: list[DubbingSegmentReport] = []
     clips: list[tuple[float, Path]] = []
     skipped = 0
+    speaker_map = dict(speaker_voices or {})
 
     report(stage="tts", fraction=0.0, message=f"{total_lines} lines via {chosen}/{speaker}")
 
@@ -328,12 +342,22 @@ def dub(
             skipped += 1
             continue
 
+        line_voice = (
+            segment.voice
+            or (speaker_map.get(segment.speaker) if segment.speaker else None)
+            or speaker
+        )
+        line_rate = (
+            f"{int(round((segment.speed - 1.0) * 100)):+d}%"
+            if segment.speed is not None and segment.speed > 0
+            else rate
+        )
         line = _render_line(
             segment,
             text,
             provider=chosen,
-            voice=speaker,
-            rate=rate,
+            voice=line_voice,
+            rate=line_rate,
             folder=folder,
             slot_end=slots[segment.index],
             timing_rewrite=timing_rewrite,

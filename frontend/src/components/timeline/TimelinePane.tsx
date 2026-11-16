@@ -1,8 +1,9 @@
-import { Captions, ChevronDown, ChevronUp, Film, Maximize2, Music2, Ruler } from "lucide-react";
+import { Captions, ChevronDown, ChevronUp, Film, Maximize2, Music2, Ruler, ScanText, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { clamp, formatTime } from "@/lib/format";
 import { player } from "@/lib/player";
+import { runRangeTranscribe } from "@/lib/tasks";
 import { useEditor } from "@/store/editorStore";
 
 const TRACKS = [
@@ -22,6 +23,8 @@ export function TimelinePane() {
   const zoom = useEditor((state) => state.zoom);
   const selected = useEditor((state) => state.selected);
   const follow = useEditor((state) => state.followPlayhead);
+  const selectionRange = useEditor((state) => state.selectionRange);
+  const pending = useEditor((state) => state.pending);
   const update = useEditor((state) => state.update);
   const setPlayhead = useEditor((state) => state.setPlayhead);
   const collapsed = useEditor((state) => state.timelineCollapsed);
@@ -75,6 +78,64 @@ export function TimelinePane() {
         <span className="font-mono text-[10px] text-slate-500">
           {formatTime(playhead)} / {formatTime(source?.duration ?? 0)}
         </span>
+
+        {/* CapCap Range Selection & Alt Re-Transcribe (OCR / Whisper) */}
+        {source && (
+          <div className="flex items-center gap-1 text-[10px]">
+            <button
+              className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
+              title="Đặt điểm bắt đầu khoảng chọn tại vị trí playhead"
+              onClick={() => {
+                const end = selectionRange ? Math.max(selectionRange[1], playhead + 1) : Math.min(duration, playhead + 5);
+                update({ selectionRange: [playhead, end] });
+              }}
+            >
+              [ Đầu
+            </button>
+            <button
+              className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
+              title="Đặt điểm kết thúc khoảng chọn tại vị trí playhead"
+              onClick={() => {
+                const start = selectionRange ? Math.min(selectionRange[0], Math.max(0, playhead - 0.5)) : Math.max(0, playhead - 5);
+                update({ selectionRange: [start, Math.max(start + 0.5, playhead)] });
+              }}
+            >
+              Cuối ]
+            </button>
+            {selectionRange && (
+              <>
+                <span className="font-mono text-[10px] text-brand">
+                  {selectionRange[0].toFixed(1)}s–{selectionRange[1].toFixed(1)}s
+                </span>
+                <button
+                  className="btn-ghost !px-1.5 !py-0.5 !text-[10px] text-amber-300"
+                  disabled={Boolean(pending.transcribe)}
+                  onClick={() => void runRangeTranscribe("ocr")}
+                  title="Tách lại phụ đề trong khoảng chọn bằng OCR"
+                >
+                  <ScanText size={10} />
+                  Alt: OCR
+                </button>
+                <button
+                  className="btn-ghost !px-1.5 !py-0.5 !text-[10px] text-sky-300"
+                  disabled={Boolean(pending.transcribe)}
+                  onClick={() => void runRangeTranscribe("whisper")}
+                  title="Tách lại phụ đề trong khoảng chọn bằng Whisper"
+                >
+                  <Sparkles size={10} />
+                  Alt: Whisper
+                </button>
+                <button
+                  className="text-slate-500 hover:text-slate-300"
+                  onClick={() => update({ selectionRange: null })}
+                  title="Bỏ khoảng chọn"
+                >
+                  ×
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
         <label className="ml-auto flex items-center gap-1.5 text-[10px] text-slate-500">
           <Ruler size={10} />
@@ -231,6 +292,17 @@ export function TimelinePane() {
                 </span>
               )}
             </div>
+
+            {/* Selection Range Highlight */}
+            {selectionRange && (
+              <div
+                className="pointer-events-none absolute bottom-0 top-0 z-[5] border-x border-brand/80 bg-brand/10"
+                style={{
+                  left: selectionRange[0] * pps,
+                  width: Math.max((selectionRange[1] - selectionRange[0]) * pps, 4),
+                }}
+              />
+            )}
 
             {/* Playhead */}
             <div

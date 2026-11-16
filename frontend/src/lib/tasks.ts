@@ -6,10 +6,14 @@
  * human-readable line to the activity log, so a failure is never silent.
  */
 import {
+  analyzeDialogueContext,
+  exportAudioOnly,
   exportCapCut,
   exportSubtitles,
+  importSrtFile,
   probeVideo,
   remixDub,
+  renderFastPreview,
   renderVideo,
   synthesizeCue,
   synthesizeDub,
@@ -107,6 +111,12 @@ export async function runTranscribe(): Promise<void> {
       vad: true,
       audio_mode: state.audioMode,
       ocr_fill: ocrFill,
+      dedup_enabled: state.dedupEnabled,
+      dedup_similarity: state.dedupSimilarity,
+      hallucination_filter_enabled: state.hallucinationFilter,
+      hallucination_silence_threshold: state.hallucinationSilence,
+      diarize: state.diarize,
+      num_speakers: state.numSpeakers,
     });
     state.setSegments(result.segments);
     state.pushLog(
@@ -126,6 +136,87 @@ export async function runTranscribe(): Promise<void> {
   }
 }
 
+export async function runRangeTranscribe(mode: "ocr" | "whisper"): Promise<void> {
+  const state = store();
+  const source = state.source;
+  const range = state.selectionRange;
+  if (!source?.path || !range) {
+    state.pushLog("warn", "Hãy kéo chọn khoảng thời gian trên Timeline trước.");
+    return;
+  }
+  const [start, end] = range;
+  state.beginTask("transcribe");
+  state.pushLog("info", `Đang tách lại đoạn ${start.toFixed(1)}s–${end.toFixed(1)}s bằng ${mode.toUpperCase()}…`);
+  try {
+    const result = await transcribeVideo({
+      video_path: source.path,
+      language: state.sourceLanguage,
+      provider: mode === "ocr" ? "ocr" : "local",
+      model: mode === "whisper" ? state.whisperSize : undefined,
+      start_time: start,
+      end_time: end,
+      dedup_enabled: state.dedupEnabled,
+      dedup_similarity: state.dedupSimilarity,
+    });
+    const outside = state.segments.filter((s) => s.end <= start + 0.05 || s.start >= end - 0.05);
+    const merged = [...outside, ...result.segments]
+      .sort((a, b) => a.start - b.start)
+      .map((item, idx) => ({ ...item, index: idx + 1 }));
+    state.setSegments(merged);
+    state.pushLog("success", `Đã thay thế ${result.segments.length} dòng trong khoảng ${start.toFixed(1)}s–${end.toFixed(1)}s.`);
+  } catch (error) {
+    state.pushLog("error", `Tách lại khoảng chọn thất bại: ${message(error)}`);
+  } finally {
+    state.endTask("transcribe");
+  }
+}
+
+export async function runImportSrtText(srtContent: string, targetTrack: 1 | 2 = 1): Promise<void> {
+  const state = store();
+  state.beginTask("import");
+  try {
+    const result = await importSrtFile({ srt_content: srtContent });
+    if (targetTrack === 2) {
+      state.update({ secondarySegments: result.segments, presentationMode: "bilingual" });
+      state.pushLog("success", `Đã nhập ${result.segments.length} dòng vào Phụ đề 2 (TS2).`);
+    } else {
+      state.setSegments(result.segments);
+      state.pushLog("success", `Đã nhập ${result.segments.length} dòng phụ đề từ tệp SRT.`);
+    }
+  } catch (error) {
+    state.pushLog("error", `Nhập SRT thất bại: ${message(error)}`);
+  } finally {
+    state.endTask("import");
+  }
+}
+
+export async function runAnalyzeContext(): Promise<void> {
+  const state = store();
+  if (!state.segments.length) {
+    state.pushLog("warn", "Chưa có phụ đề để phân tích ngữ cảnh.");
+    return;
+  }
+  state.beginTask("analyzeContext");
+  state.pushLog("info", "Đang phân tích nhân vật & đại từ xưng hô toàn kịch bản…");
+  try {
+    const result = await analyzeDialogueContext({
+      segments: state.segments,
+      target_language: state.targetLanguage,
+      provider: state.translateProvider,
+      preset: state.translatePreset,
+    });
+    state.update({
+      contextResult: result,
+      contextGuidance: result.context_guidance || state.contextGuidance,
+    });
+    state.pushLog("success", `Đã phân tích ${result.characters.length} nhân vật & quy tắc xưng hô.`);
+  } catch (error) {
+    state.pushLog("error", `Phân tích ngữ cảnh thất bại: ${message(error)}`);
+  } finally {
+    state.endTask("analyzeContext");
+  }
+}
+
 export async function runTranslate(): Promise<void> {
   const state = store();
   if (!state.segments.length) {
@@ -141,6 +232,9 @@ export async function runTranslate(): Promise<void> {
       source_language: state.sourceLanguage,
       provider: state.translateProvider,
       style: state.translateStyle,
+      preset: state.translatePreset,
+      auto_context: state.autoContext,
+      context_guidance: state.contextGuidance || null,
     });
     state.setSegments(result.segments);
     state.pushLog("success", `Đã dịch ${result.segments.length} dòng · ${result.provider}/${result.model}`);
@@ -171,6 +265,8 @@ export async function runDub(): Promise<void> {
     timing_rewrite: true,
     language: state.useTranslationForDub ? state.targetLanguage : state.sourceLanguage,
     video_path: state.source?.path ?? null,
+    speaker_voices: state.speakerVoices,
+    trim_silence: state.trimSilence,
   };
 
   state.beginTask("dub");
@@ -219,7 +315,7 @@ export async function runExport(): Promise<void> {
   state.beginTask("render");
   try {
     let subtitlePath: string | null = null;
-    if (state.segments.length) {
+    if (state.segments.length && state.presentationMode !== "none") {
       const assPath = joinPath(directoryOf(output), `${stem(output)}.ass`);
       const ass = await exportSubtitles({
         segments: state.segments,
@@ -228,6 +324,9 @@ export async function runExport(): Promise<void> {
         aspect: state.aspect,
         use_translation: state.segments.some((segment) => segment.translation?.trim()),
         style: state.subtitleStyle,
+        presentation_mode: state.presentationMode,
+        secondary_segments: state.secondarySegments,
+        secondary_style: state.secondaryStyle,
       });
       subtitlePath = ass.output_path;
       state.pushLog("info", `Đã ghi phụ đề ${ass.lines} dòng → ${ass.output_path}`);
@@ -241,9 +340,12 @@ export async function runExport(): Promise<void> {
       subtitle_path: subtitlePath,
       dub_track_path: state.dub?.track_path ?? null,
       background_gain: state.duckGain,
-      // Without a dub the export keeps the untouched soundtrack, exactly as it
-      // came in; with one, the toggle decides whether it survives underneath.
+      voice_gain: state.voiceGain,
       keep_original_audio: !state.dub || state.keepOriginalAudio,
+      quality_profile: state.qualityProfile,
+      use_nvenc: state.useNvenc,
+      flip_horizontal: state.flipHorizontal,
+      layers: state.layers,
     });
     state.pushLog(
       "success",
@@ -253,6 +355,87 @@ export async function runExport(): Promise<void> {
     state.pushLog("error", `Render thất bại: ${message(error)}`);
   } finally {
     state.endTask("render");
+  }
+}
+
+export async function runFastPreview(): Promise<string | null> {
+  const state = store();
+  const source = state.source;
+  if (!source?.path) {
+    state.pushLog("warn", "Hãy mở video trước khi xem thử 5s.");
+    return null;
+  }
+  state.beginTask("fastPreview");
+  state.pushLog("info", `Đang render bản xem thử 5s tại ${state.playhead.toFixed(1)}s…`);
+  try {
+    let subtitlePath: string | null = null;
+    if (state.segments.length && state.presentationMode !== "none") {
+      const assPath = joinPath(directoryOf(source.path), `.${stem(source.path)}_preview.ass`);
+      const ass = await exportSubtitles({
+        segments: state.segments,
+        output_path: assPath,
+        fmt: "ass",
+        aspect: state.aspect,
+        use_translation: state.segments.some((segment) => segment.translation?.trim()),
+        style: state.subtitleStyle,
+        presentation_mode: state.presentationMode,
+        secondary_segments: state.secondarySegments,
+        secondary_style: state.secondaryStyle,
+      });
+      subtitlePath = ass.output_path;
+    }
+    const result = await renderFastPreview({
+      video_path: source.path,
+      output_path: joinPath(directoryOf(source.path), `.${stem(source.path)}_preview5s.mp4`),
+      aspect: state.aspect,
+      subtitle_path: subtitlePath,
+      dub_track_path: state.dub?.track_path ?? null,
+      background_gain: state.duckGain,
+      voice_gain: state.voiceGain,
+      keep_original_audio: !state.dub || state.keepOriginalAudio,
+      flip_horizontal: state.flipHorizontal,
+      layers: state.layers,
+      start_time: Math.max(0, state.playhead),
+      sample_duration: 5.0,
+    });
+    state.pushLog("success", `Xem thử 5s sẵn sàng (${result.elapsed_s}s)`);
+    return result.output_path;
+  } catch (error) {
+    state.pushLog("error", `Xem thử 5s thất bại: ${message(error)}`);
+    return null;
+  } finally {
+    state.endTask("fastPreview");
+  }
+}
+
+export async function runExportAudio(mode: "voice" | "bgm" | "mix"): Promise<void> {
+  const state = store();
+  const source = state.source;
+  if (!source?.path && !state.dub?.track_path) {
+    state.pushLog("warn", "Chưa có nguồn âm thanh để xuất.");
+    return;
+  }
+  const baseDir = source?.path ? directoryOf(source.path) : "";
+  const baseNameStr = source?.path ? stem(source.path) : "audio";
+  const suggested = baseDir ? joinPath(baseDir, `${baseNameStr}_${mode}.wav`) : `${baseNameStr}_${mode}.wav`;
+  const output = await pickSavePath(suggested);
+  if (!output) return;
+
+  state.beginTask("exportAudio");
+  try {
+    const res = await exportAudioOnly({
+      output_path: output,
+      mode,
+      dub_track_path: state.dub?.track_path ?? null,
+      video_path: source?.path ?? null,
+      background_gain: state.duckGain,
+      voice_gain: state.voiceGain,
+    });
+    state.pushLog("success", `Đã xuất âm thanh (${mode}) → ${res.output_path} (${formatBytes(res.size_bytes)})`);
+  } catch (error) {
+    state.pushLog("error", `Xuất âm thanh thất bại: ${message(error)}`);
+  } finally {
+    state.endTask("exportAudio");
   }
 }
 

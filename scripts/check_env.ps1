@@ -7,6 +7,11 @@ param()
 
 $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
+if (Test-Path "$root\.cache\cargo\bin\cargo.exe") {
+    $env:CARGO_HOME = "$root\.cache\cargo"
+    $env:RUSTUP_HOME = "$root\.cache\rustup"
+    $env:PATH = "$root\.cache\cargo\bin;$root\resources\ffmpeg;$env:PATH"
+}
 
 $script:Fails = 0
 $script:Warns = 0
@@ -120,14 +125,14 @@ else {
 }
 
 # --------------------------------------------------------------------- Rust
-$cargoPath = Find-Tool -Name "cargo" -Fallback @("$env:USERPROFILE\.cargo\bin\cargo.exe")
-$rustcPath = Find-Tool -Name "rustc" -Fallback @("$env:USERPROFILE\.cargo\bin\rustc.exe")
+$cargoPath = Find-Tool -Name "cargo" -Fallback @("$root\.cache\cargo\bin\cargo.exe", "$env:USERPROFILE\.cargo\bin\cargo.exe")
+$rustcPath = Find-Tool -Name "rustc" -Fallback @("$root\.cache\cargo\bin\rustc.exe", "$env:USERPROFILE\.cargo\bin\rustc.exe")
 
 $rustc = Get-ExeVersion -Path $rustcPath -CommandArgs @("--version")
 $cargo = Get-ExeVersion -Path $cargoPath -CommandArgs @("--version")
 
 if ($rustc -and $cargo) {
-    $onPath = [bool](Get-Command cargo -ErrorAction SilentlyContinue)
+    $onPath = [bool](Get-Command cargo -ErrorAction SilentlyContinue) -or (Test-Path "$root\.cache\cargo\bin\cargo.exe")
     if ($onPath) {
         Write-Result "Rust" "$rustc / $cargo" "OK"
     }
@@ -140,10 +145,10 @@ else {
 }
 
 # ------------------------------------------------------------------- FFmpeg
-$ffmpegPath = Find-Tool -Name "ffmpeg" -Fallback @()
+$ffmpegPath = Find-Tool -Name "ffmpeg" -Fallback @("$root\resources\ffmpeg\ffmpeg.exe")
 $ffmpeg = Get-ExeVersion -Path $ffmpegPath -CommandArgs @("-version")
 if ($ffmpeg) {
-    if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+    if ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -or (Test-Path "$root\resources\ffmpeg\ffmpeg.exe")) {
         Write-Result "FFmpeg" $ffmpeg "OK"
     }
     else {

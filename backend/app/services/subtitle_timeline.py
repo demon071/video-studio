@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field, replace
+from difflib import SequenceMatcher
 
 MAX_CHARS = 42           # two lines of 21 characters
 MAX_DURATION = 7.0       # longer than this and the eye loses the line
@@ -347,6 +348,86 @@ def _drop_loops(cues: list[Cue], *, repeat_threshold: int = 3) -> list[Cue]:
     return kept
 
 
+def _norm_for_dedup(text: str) -> str:
+    value = str(text or "").strip().lower()
+    value = re.sub(r"[^\w\s]", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _is_informative_containment(left_text: str, right_text: str) -> bool:
+    """Ported from CapCap AsrMergeService._is_informative_containment."""
+    if not left_text or not right_text or left_text == right_text:
+        return False
+    short_text, long_text = sorted((left_text, right_text), key=len)
+    short_words = short_text.split()
+    long_words = long_text.split()
+    informative_chars = sum(1 for char in short_text if char.isalnum())
+    if informative_chars >= 10 and len(short_words) >= 3:
+        width = len(short_words)
+        if any(long_words[i : i + width] == short_words for i in range(len(long_words) - width + 1)):
+            return True
+
+    def _is_han(character: str) -> bool:
+        cp = ord(character)
+        return 0x3400 <= cp <= 0x4DBF or 0x4E00 <= cp <= 0x9FFF or 0x20000 <= cp <= 0x2FA1F
+
+    han_count = sum(1 for char in short_text if _is_han(char))
+    return han_count >= 8 and short_text in long_text
+
+
+def dedup_cues(
+    cues: list[Cue],
+    *,
+    dedup_enabled: bool = True,
+    dedup_similarity: float = 0.82,
+) -> list[Cue]:
+    """Remove duplicate wording where overlapping/adjacent audio sections join (ported from CapCap).
+
+    Keeps the fuller sentence when one cue is a clipped prefix/suffix of the
+    adjacent cue and their timings overlap or touch closely.
+    """
+    if not dedup_enabled or len(cues) < 2:
+        return list(cues)
+
+    threshold = min(max(float(dedup_similarity), 0.5), 1.0)
+    result: list[Cue] = []
+    for cue in cues:
+        if not result:
+            result.append(cue)
+            continue
+        prev = result[-1]
+        prev_norm = _norm_for_dedup(prev.text)
+        curr_norm = _norm_for_dedup(cue.text)
+        if not prev_norm or not curr_norm:
+            result.append(cue)
+            continue
+
+        overlap = min(prev.end, cue.end) - max(prev.start, cue.start)
+        gap = cue.start - prev.end
+        shorter_dur = max(0.05, min(prev.duration, cue.duration))
+        sim = SequenceMatcher(None, prev_norm, curr_norm).ratio()
+
+        is_containment = prev_norm != curr_norm and (prev_norm in curr_norm or curr_norm in prev_norm)
+        informative = (
+            is_containment
+            and _is_informative_containment(prev_norm, curr_norm)
+            and gap <= 0.35
+            and threshold < 1.0
+        )
+        substantial_overlap = overlap >= max(0.10, shorter_dur * 0.60)
+        is_duplicate = informative if is_containment else (substantial_overlap and sim >= threshold)
+
+        if is_duplicate:
+            if len(curr_norm) > len(prev_norm) or (len(curr_norm) == len(prev_norm) and cue.duration > prev.duration):
+                result[-1] = replace(cue, start=min(prev.start, cue.start), end=max(prev.end, cue.end))
+            else:
+                result[-1] = replace(prev, end=max(prev.end, cue.end))
+            continue
+
+        result.append(cue)
+    return result
+
+
 def _can_merge(left: Cue, right: Cue, max_chars: int) -> bool:
     if right.start - left.end > MERGE_GAP or right.start < left.start:
         return False
@@ -400,17 +481,20 @@ def polish(
     max_chars: int = MAX_CHARS,
     min_duration: float = MIN_DURATION,
     max_duration: float = MAX_DURATION,
+    dedup_enabled: bool = True,
+    dedup_similarity: float = 0.82,
 ) -> list[Cue]:
-    """Full pass: drop noise, glue fragments, split long cues, fix the clock."""
+    """Full pass: drop noise, dedup boundary overlaps, glue fragments, split long cues, fix the clock."""
     cleaned = _clean(cues)
     if not cleaned:
         return []
 
-    merged = _merge(_drop_loops(cleaned), max_chars=max_chars)
+    deduped = dedup_cues(_drop_loops(cleaned), dedup_enabled=dedup_enabled, dedup_similarity=dedup_similarity)
+    merged = _merge(deduped, max_chars=max_chars)
     split: list[Cue] = []
     for cue in merged:
         split.extend(_split(cue, max_chars=max_chars, max_duration=max_duration))
     return _fit(split, min_duration=min_duration, max_duration=max_duration)
 
 
-__all__ = ["Cue", "MIN_GAP", "normalize_text", "polish"]
+__all__ = ["Cue", "MIN_GAP", "dedup_cues", "normalize_text", "polish"]

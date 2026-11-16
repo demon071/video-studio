@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronsRight, Loader2, Plus, RotateCw, ScanText, Trash2, Volume2 } from "lucide-react";
+import { ChevronLeft, ChevronsRight, History, Loader2, Plus, RotateCw, ScanText, Trash2, Volume2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { CueReadingDialog } from "@/components/subtitles/CueReadingDialog";
@@ -35,6 +35,10 @@ export function SubtitleTable() {
   const update = useEditor((state) => state.update);
   const patchSegment = useEditor((state) => state.patchSegment);
   const removeSegment = useEditor((state) => state.removeSegment);
+  const restoreSegmentTiming = useEditor((state) => state.restoreSegmentTiming);
+  const presentationMode = useEditor((state) => state.presentationMode);
+  const activeTrack = useEditor((state) => state.activeSubtitleTrack);
+  const secondarySegments = useEditor((state) => state.secondarySegments);
   const setPlayhead = useEditor((state) => state.setPlayhead);
   const dubDirty = useEditor((state) => state.dubDirty);
   const hasSource = useEditor((state) => Boolean(state.source));
@@ -102,10 +106,36 @@ export function SubtitleTable() {
       <header className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-2.5">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Bảng phụ đề</span>
         <span className="font-mono text-[10px] text-slate-600">{segments.length}</span>
+        {presentationMode === "bilingual" && (
+          <div className="flex items-center overflow-hidden rounded border border-border text-[9px]">
+            <button
+              className={`px-1.5 py-0.5 ${activeTrack === 1 ? "bg-brand text-surface-0 font-bold" : "text-slate-400"}`}
+              onClick={() => update({ activeSubtitleTrack: 1 })}
+              title="Phụ đề chính (TS1)"
+            >
+              TS1 ({segments.length})
+            </button>
+            <button
+              className={`px-1.5 py-0.5 ${activeTrack === 2 ? "bg-brand text-surface-0 font-bold" : "text-slate-400"}`}
+              onClick={() => update({ activeSubtitleTrack: 2 })}
+              title="Phụ đề phụ song ngữ (TS2)"
+            >
+              TS2 ({secondarySegments.length || segments.length})
+            </button>
+          </div>
+        )}
         {dubDirty && (
           <span className="h-1.5 w-1.5 rounded-full bg-amber-400" title="Phụ đề đã sửa — cần lồng tiếng lại" />
         )}
         <div className="ml-auto flex items-center gap-1">
+          <button
+            className="text-slate-500 hover:text-amber-300 disabled:opacity-40"
+            title="Khôi phục mốc thời gian gốc ban đầu (Restore Original Timing)"
+            disabled={!segments.some((s) => s.original_start != null)}
+            onClick={() => restoreSegmentTiming()}
+          >
+            <History size={11} />
+          </button>
           <SubtitleStylePanel />
           <button
             className="text-slate-500 hover:text-brand disabled:cursor-not-allowed disabled:opacity-40"
@@ -175,6 +205,14 @@ export function SubtitleTable() {
                 <TimeInput value={segment.start} onCommit={(value) => patchSegment(segment.index, { start: value })} />
                 <span className="text-[9px] text-slate-600">→</span>
                 <TimeInput value={segment.end} onCommit={(value) => patchSegment(segment.index, { end: value })} />
+
+                <input
+                  className="field !w-14 !px-1 !py-0.5 font-mono !text-[9px] text-brand"
+                  value={segment.speaker ?? ""}
+                  placeholder="SPK"
+                  title="Người nói (Speaker ID)"
+                  onChange={(e) => patchSegment(segment.index, { speaker: e.target.value || null })}
+                />
 
                 <span className="ml-auto shrink-0 text-right font-mono text-[9px] leading-tight">
                   {report ? (

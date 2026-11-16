@@ -30,4 +30,41 @@ class ThumbnailResult(BaseModel):
     output_path: str
 
 
-__all__ = ["ProbeRequest", "ProbeResult", "ThumbnailRequest", "ThumbnailResult"]
+class MediaTrimRequest(BaseModel):
+    video_path: str
+    output_path: str
+    start: float = Field(ge=0.0)
+    end: float = Field(gt=0.0)
+    reencode: bool = False
+
+
+class MediaConcatRequest(BaseModel):
+    video_paths: list[str]
+    output_path: str
+    reencode: bool = False
+
+
+class MediaDemuxRequest(BaseModel):
+    video_path: str
+    audio_output: str | None = None
+    video_only_output: str | None = None
+
+
+class MediaMuxRequest(BaseModel):
+    video_path: str
+    audio_path: str
+    output_path: str
+    replace_audio: bool = True
+    audio_gain: float = Field(default=1.0, ge=0.0, le=3.0)
+
+
+__all__ = [
+    "MediaConcatRequest",
+    "MediaDemuxRequest",
+    "MediaMuxRequest",
+    "MediaTrimRequest",
+    "ProbeRequest",
+    "ProbeResult",
+    "ThumbnailRequest",
+    "ThumbnailResult",
+]

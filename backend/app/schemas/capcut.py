@@ -21,6 +21,15 @@ class CapCutExportRequest(BaseModel):
     segments: list[SubtitleSegment] = Field(default_factory=list, description="Caption cues")
     use_translation: bool = Field(default=True, description="Caption the translation, like the ASS burn")
     style: SubtitleStyle | None = Field(default=None, description="Caption look; None keeps the default")
+    presentation_mode: Literal["none", "single", "bilingual"] = Field(
+        default="single", description="Subtitle presentation mode (none, single, bilingual)"
+    )
+    secondary_segments: list[SubtitleSegment] = Field(
+        default_factory=list, description="Secondary subtitle cues (TS2) for bilingual mode"
+    )
+    secondary_style: SubtitleStyle | None = Field(
+        default=None, description="Secondary subtitle style (TS2)"
+    )
     dub_track_path: str | None = Field(default=None, description="Assembled dub track, used as a fallback")
     dub_segments: list[DubbingSegmentReport] = Field(
         default_factory=list,

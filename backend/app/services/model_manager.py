@@ -276,6 +276,34 @@ CATALOG: tuple[ModelSpec, ...] = (
         licence="Apache-2.0",
         flat=True,
     ),
+    ModelSpec(
+        key="pyannote-sherpa-diarization",
+        kind="stt",
+        label="Speaker Diarization (Pyannote + 3D-Speaker)",
+        description=(
+            "Offline speaker turn segmentation and embedding via sherpa-onnx. "
+            "Tags subtitle lines with SPEAKER_00, SPEAKER_01, ... for multi-speaker dubbing."
+        ),
+        size_mb=42,
+        files=(
+            RemoteFile(
+                filename="model.int8.onnx",
+                repo_id="csukuangfj/sherpa-onnx-pyannote-segmentation-3-0",
+                size_mb=1.5,
+            ),
+            RemoteFile(
+                filename="3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+                url=(
+                    "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+                    "speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+                ),
+                size_mb=40.5,
+            ),
+        ),
+        requires=("sherpa_onnx",),
+        licence="MIT",
+        folder_name="diarization",
+    ),
 )
 
 MODEL_INDEX: dict[str, ModelSpec] = {spec.key: spec for spec in CATALOG}
@@ -539,13 +567,9 @@ def whisper_reference(size: str, settings: Settings | None = None) -> tuple[str,
     root = model_root(settings) / "whisper"
     root.mkdir(parents=True, exist_ok=True)
 
-    local = root / f"whisper-{size}"
-    if (local / WHISPER_CORE).is_file():
-        return str(local), root
-
-    spec = MODEL_INDEX.get(f"whisper-{size}")
-    if spec and spec.snapshot_repo and (local / WHISPER_CORE).is_file():
-        return str(local), root
+    for candidate in (root / f"whisper-{size}", root / size):
+        if (candidate / WHISPER_CORE).is_file():
+            return str(candidate), root
 
     return f"Systran/faster-whisper-{size}", root
 

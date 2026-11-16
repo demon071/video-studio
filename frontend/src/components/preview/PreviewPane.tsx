@@ -3,16 +3,22 @@ import {
   Eye,
   EyeOff,
   FileWarning,
+  FlipHorizontal,
+  Loader2,
   Pause,
   Play,
   ScanText,
   SkipBack,
   SkipForward,
+  Square,
+  Sparkles,
+  Trash2,
+  Type,
   Volume2,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { saveSettings } from "@/lib/api";
+import { ocrRegionTranslate, saveSettings } from "@/lib/api";
 import { formatTime } from "@/lib/format";
 import { toAssetUrl } from "@/lib/media";
 import { player } from "@/lib/player";
@@ -24,7 +30,9 @@ import {
   regionLabel,
   type Region,
 } from "@/lib/region";
+import { runFastPreview } from "@/lib/tasks";
 import { selectActiveSegment, useEditor } from "@/store/editorStore";
+import type { LayerKind } from "@/types/editor";
 
 const RATIO: Record<string, string> = {
   "9:16": "9 / 16",
@@ -53,6 +61,16 @@ export function PreviewPane() {
   const setPlayhead = useEditor((state) => state.setPlayhead);
   const previewSubtitles = useEditor((state) => state.previewSubtitles);
   const subtitleStyle = useEditor((state) => state.subtitleStyle);
+  const secondaryStyle = useEditor((state) => state.secondaryStyle);
+  const presentationMode = useEditor((state) => state.presentationMode);
+  const secondarySegments = useEditor((state) => state.secondarySegments);
+  const layers = useEditor((state) => state.layers);
+  const selectedLayerId = useEditor((state) => state.selectedLayerId);
+  const addLayer = useEditor((state) => state.addLayer);
+  const patchLayer = useEditor((state) => state.patchLayer);
+  const removeLayer = useEditor((state) => state.removeLayer);
+  const flipHorizontal = useEditor((state) => state.flipHorizontal);
+  const pending = useEditor((state) => state.pending);
   const previewDub = useEditor((state) => state.previewDub);
   const keepOriginalAudio = useEditor((state) => state.keepOriginalAudio);
   const duckGain = useEditor((state) => state.duckGain);
@@ -244,7 +262,60 @@ export function PreviewPane() {
 
   const duration = source?.duration ?? 0;
   const text = (segment?.translation || segment?.text || "").trim();
-  const caption = previewSubtitles && text ? text : null;
+  const caption =
+    previewSubtitles && presentationMode !== "none" && text ? text : null;
+  const secondaryText =
+    previewSubtitles && presentationMode === "bilingual"
+      ? (
+          secondarySegments.find((s) => playhead >= s.start && playhead < s.end)?.text ||
+          segment?.text ||
+          ""
+        ).trim()
+      : "";
+  const activeLayers = layers.filter(
+    (l) => l.end <= l.start || (playhead >= l.start && playhead <= l.end),
+  );
+  const selectedLayer = layers.find((l) => l.id === selectedLayerId) ?? null;
+
+  const handleAddVisualLayer = (kind: LayerKind) => {
+    const d = Math.max(duration, 5);
+    addLayer({
+      id: `layer_${Date.now()}`,
+      kind,
+      label: kind === "mask" ? "Khung che" : kind === "blur" ? "Làm mờ" : "Chữ nổi",
+      start: 0,
+      end: d,
+      x: 0.1,
+      y: kind === "text" ? 0.12 : 0.72,
+      w: 0.8,
+      h: 0.14,
+      color: kind === "text" ? "#FFE082" : "#000000",
+      opacity: kind === "mask" ? 0.85 : 1.0,
+      text: kind === "text" ? "Tiêu đề / Ghi chú" : "",
+      font_size: 32,
+    });
+  };
+
+  const handleOcrTranslateNow = async () => {
+    if (!source?.path) return;
+    try {
+      pushLog("info", "Đang quét & dịch nhanh vùng OCR tại khung hình hiện tại…");
+      const res = await ocrRegionTranslate({
+        video_path: source.path,
+        timestamp: playhead,
+        region: shownRegion,
+        source_language: useEditor.getState().sourceLanguage,
+        target_language: useEditor.getState().targetLanguage,
+        translate_provider: useEditor.getState().translateProvider,
+      });
+      pushLog(
+        "success",
+        `OCR Dịch vùng [${formatTime(res.timestamp)}]: "${res.text}" → "${res.translation}"`,
+      );
+    } catch (err) {
+      pushLog("error", `OCR Dịch vùng thất bại: ${(err as Error).message}`);
+    }
+  };
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -279,7 +350,7 @@ export function PreviewPane() {
               ref={videoRef}
               key={source.url}
               src={source.url}
-              className="h-full w-full object-contain"
+              className={`h-full w-full object-contain ${flipHorizontal ? "-scale-x-100" : ""}`}
               playsInline
               preload="metadata"
               onClick={() => {
@@ -294,6 +365,71 @@ export function PreviewPane() {
                 player.seek(useEditor.getState().playhead);
               }}
             />
+
+            {/* Visual Layers (Mask, Blur, Text) */}
+            {activeLayers.map((layer) => (
+              <div
+                key={layer.id}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  update({ selectedLayerId: layer.id });
+                }}
+                className={`absolute cursor-pointer rounded transition-shadow ${
+                  selectedLayerId === layer.id ? "ring-2 ring-brand" : ""
+                }`}
+                style={{
+                  left: `${layer.x * 100}%`,
+                  top: `${layer.y * 100}%`,
+                  width: `${layer.w * 100}%`,
+                  height: `${layer.h * 100}%`,
+                  ...(layer.kind === "mask"
+                    ? { backgroundColor: rgba(layer.color || "#000000", layer.opacity) }
+                    : layer.kind === "blur"
+                      ? {
+                          backdropFilter: "blur(10px)",
+                          backgroundColor: "rgba(255,255,255,0.08)",
+                          border: "1px dashed rgba(255,255,255,0.3)",
+                        }
+                      : {}),
+                }}
+              >
+                {layer.kind === "text" && (
+                  <span
+                    className="block w-full text-center font-bold"
+                    style={{
+                      color: layer.color || "#FFE082",
+                      fontSize: "clamp(11px, 3.8cqh, 28px)",
+                      textShadow: "0 2px 6px rgba(0,0,0,0.9)",
+                    }}
+                  >
+                    {layer.text}
+                  </span>
+                )}
+              </div>
+            ))}
+
+            {secondaryText && (
+              <div
+                className="pointer-events-none absolute inset-x-0 flex justify-center"
+                style={{
+                  paddingLeft: `${secondaryStyle.margin_h}%`,
+                  paddingRight: `${secondaryStyle.margin_h}%`,
+                  bottom: `${secondaryStyle.margin_v}%`,
+                }}
+              >
+                <span
+                  className="max-w-full rounded px-1.5 py-0.5 leading-snug"
+                  style={{
+                    fontFamily: secondaryStyle.font,
+                    fontSize: `max(8px, calc(4.2cqh * ${secondaryStyle.size}))`,
+                    color: secondaryStyle.color,
+                    backgroundColor: "rgba(0,0,0,0.5)",
+                  }}
+                >
+                  {secondaryText}
+                </span>
+              </div>
+            )}
 
             {caption && (
               <div
@@ -421,6 +557,13 @@ export function PreviewPane() {
                   onPointerDown={(event) => event.stopPropagation()}
                 >
                   <button
+                    className="rounded px-1.5 py-0.5 text-[10px] text-amber-300 hover:bg-white/10"
+                    onClick={() => void handleOcrTranslateNow()}
+                    title="Quét chữ trong vùng này và dịch ngay lập tức (OCR Translator)"
+                  >
+                    Quét & Dịch ngay
+                  </button>
+                  <button
                     className="rounded px-1.5 py-0.5 text-[10px] text-slate-300 hover:bg-white/10 hover:text-white"
                     onClick={() => void saveRegion(null)}
                     title="Quay về dải dưới 45% khung hình"
@@ -447,6 +590,94 @@ export function PreviewPane() {
           </div>
         )}
       </div>
+
+      {/* CapCap Visual Layer & Quick Preview Toolbar */}
+      {source && (
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-border bg-surface-2 px-3 py-1 text-[10px]">
+          <span className="font-semibold uppercase tracking-wider text-slate-500">Lớp phủ:</span>
+          <button
+            className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
+            onClick={() => handleAddVisualLayer("mask")}
+            title="Thêm khung che phụ đề gốc (Mask Box)"
+          >
+            <Square size={10} />+ Khung che
+          </button>
+          <button
+            className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
+            onClick={() => handleAddVisualLayer("blur")}
+            title="Thêm vùng làm mờ phụ đề gốc / logo (Blur)"
+          >
+            <Sparkles size={10} />+ Làm mờ
+          </button>
+          <button
+            className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
+            onClick={() => handleAddVisualLayer("text")}
+            title="Thêm lớp chữ cố định (Text Layer)"
+          >
+            <Type size={10} />+ Chữ
+          </button>
+          <button
+            className={`btn-ghost !px-1.5 !py-0.5 !text-[10px] ${flipHorizontal ? "border-brand text-brand" : ""}`}
+            onClick={() => update({ flipHorizontal: !flipHorizontal })}
+            title="Lật ngang video (Horizontal Flip)"
+          >
+            <FlipHorizontal size={10} />
+            Lật ngang
+          </button>
+
+          {selectedLayer && (
+            <div className="ml-2 flex items-center gap-1.5 rounded border border-border bg-surface-1 px-2 py-0.5">
+              <span className="font-mono text-brand">{selectedLayer.label}</span>
+              {selectedLayer.kind === "text" && (
+                <input
+                  className="field !w-28 !px-1 !py-0 !text-[10px]"
+                  value={selectedLayer.text}
+                  onChange={(e) => patchLayer(selectedLayer.id, { text: e.target.value })}
+                />
+              )}
+              <label className="flex items-center gap-1 text-slate-400">
+                Y%
+                <input
+                  type="number"
+                  min={0}
+                  max={95}
+                  className="field !w-12 !px-1 !py-0 font-mono !text-[10px]"
+                  value={Math.round(selectedLayer.y * 100)}
+                  onChange={(e) => patchLayer(selectedLayer.id, { y: Number(e.target.value) / 100 })}
+                />
+              </label>
+              <label className="flex items-center gap-1 text-slate-400">
+                Cao%
+                <input
+                  type="number"
+                  min={4}
+                  max={90}
+                  className="field !w-12 !px-1 !py-0 font-mono !text-[10px]"
+                  value={Math.round(selectedLayer.h * 100)}
+                  onChange={(e) => patchLayer(selectedLayer.id, { h: Number(e.target.value) / 100 })}
+                />
+              </label>
+              <button
+                className="text-slate-400 hover:text-rose-400"
+                onClick={() => removeLayer(selectedLayer.id)}
+                title="Xoá lớp phủ này"
+              >
+                <Trash2 size={10} />
+              </button>
+            </div>
+          )}
+
+          <button
+            className="btn-ghost ml-auto !px-2 !py-0.5 !text-[10px] text-emerald-300"
+            disabled={Boolean(pending.fastPreview)}
+            onClick={() => void runFastPreview()}
+            title="Render nhanh 5 giây quanh vị trí playhead bằng FFmpeg (Fast Preview)"
+          >
+            {pending.fastPreview ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}
+            Xem thử 5s
+          </button>
+        </div>
+      )}
 
       <div className="flex h-10 shrink-0 items-center gap-2 border-t border-border bg-surface-1 px-3">
         <button

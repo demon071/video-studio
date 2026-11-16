@@ -22,6 +22,7 @@ soundfile>=0.14
 # the two libraries independent. Do not "fix" this by downgrading PyAV.
 faster-whisper>=1.2,<2.0
 ctranslate2>=4.9,<5.0
+nvidia-cublas-cu12>=12,<13; sys_platform == "win32"
 # SenseVoice (zh/en/ja/ko/yue) through sherpa-onnx: the CPU path for Chinese
 # drama, and the one engine that cannot answer with the wrong language. The
 # weights (240 MB) download on first use from the Model tab.

@@ -90,8 +90,14 @@ class Settings(BaseSettings):
     source_language: str = "auto"
     target_language: str = "vi"
 
+    # --- Whisper ASR cleanup (ported from CapCap asr_options.py) ---
+    asr_dedup_enabled: bool = True
+    asr_dedup_similarity: float = 0.82
+    asr_hallucination_filter: bool = True
+    asr_hallucination_silence: float = 3.0
+
     # --- OCR subtitle extraction ---
-    ocr_engine: str = "rapidocr"         # rapidocr | paddleocr | easyocr
+    ocr_engine: str = "rapidocr"         # rapidocr | winocr | paddleocr | easyocr
     ocr_profile: str = "small"           # small (chính xác) | tiny (nhanh)
     ocr_fps: float = 3.0                 # frames sampled per second
     ocr_position: str = "bottom"         # bottom | top | full
@@ -120,6 +126,21 @@ class Settings(BaseSettings):
     tts_rate: str = "+0%"
     # CapCut voice *type* (see capcut_client.CAPCUT_VOICES), not a display name.
     capcut_voice: str = "BV421_vivn_streaming"
+    capcut_backend: str = "web"          # web | pc (native sscronet.dll)
+    capcut_pc_path: str = ""
+    # ElevenLabs TTS (ported from CapCap)
+    elevenlabs_api_key: str = ""
+    elevenlabs_model: str = "eleven_turbo_v2_5"
+    elevenlabs_voice: str = ""
+    # Edge TTS & Piper TTS
+    edge_voice: str = "vi-VN-HoaiMyNeural"
+    piper_voice: str = "vi_VN-vais1000-medium"
+    # DeepSeek & Ollama translation providers
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
+    deepseek_chat_model: str = "deepseek-chat"
+    ollama_base_url: str = "http://127.0.0.1:11434/v1"
+    ollama_chat_model: str = "qwen2.5:7b"
     # OmniVoice (k2-fsa) runs in-process on torch. The voice is a small grammar:
     # `auto`, `design:<attributes>` or `clone:<path to a 3-10 s sample>`.
     omnivoice_model: str = "k2-fsa/OmniVoice"

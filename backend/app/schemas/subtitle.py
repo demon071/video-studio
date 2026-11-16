@@ -37,12 +37,16 @@ class Provider(StrEnum):
     OCR = "ocr"
     # Offline CPU recogniser for Chinese / English / Japanese / Korean / Cantonese.
     SENSEVOICE = "sensevoice"
-    # Free web translators.
+    # Free web translators & extra LLM providers (ported from CapCap).
     GOOGLE = "google"
     BING = "bing"
-    # Dubbing voices: the cloud one, plus two local OmniVoice routes.
+    DEEPSEEK = "deepseek"
+    OLLAMA = "ollama"
+    BROWSER = "browser"
+    # Dubbing voices: the cloud ones, plus local OmniVoice / VoiceStudio routes.
     OMNIVOICE = "omnivoice"
     VOICESTUDIO = "voicestudio"
+    ELEVENLABS = "elevenlabs"
 
 
 class SubtitleSegment(BaseModel):
@@ -55,6 +59,11 @@ class SubtitleSegment(BaseModel):
     speaker: str | None = None
     translation: str | None = None
     no_speech_prob: float | None = None
+    original_start: float | None = Field(default=None, description="Last pipeline start timestamp for Restore Timing")
+    original_end: float | None = Field(default=None, description="Last pipeline end timestamp for Restore Timing")
+    voice: str | None = Field(default=None, description="Per-segment TTS voice override")
+    speed: float | None = Field(default=None, description="Per-segment TTS speed multiplier override")
+    highlights: list[str] | None = Field(default=None, description="Manual highlighted keywords")
 
     @field_validator("end")
     @classmethod
@@ -108,6 +117,45 @@ class TranscribeRequest(BaseModel):
             "leaves the audio result untouched."
         ),
     )
+    # CapCap ASR cleanup & speaker diarization options
+    dedup_enabled: bool = Field(
+        default=True,
+        description="Reduce repeated phrases where audio sections join, keeping the fuller sentence",
+    )
+    dedup_similarity: float = Field(
+        default=0.82,
+        ge=0.5,
+        le=1.0,
+        description="Normalized text similarity threshold (0.50 .. 1.00) for duplicate phrase removal",
+    )
+    hallucination_filter_enabled: bool = Field(
+        default=True,
+        description="Reduce made-up subtitles during silence",
+    )
+    hallucination_silence_threshold: float = Field(
+        default=3.0,
+        ge=0.5,
+        le=10.0,
+        description="Silence duration threshold in seconds (0.5 .. 10.0) for hallucination filtering",
+    )
+    diarize: bool = Field(
+        default=False,
+        description="Run offline speaker diarization (Sherpa-ONNX) and tag segments with SPEAKER_XX",
+    )
+    num_speakers: int = Field(
+        default=-1,
+        description="Expected number of speakers (-1 = auto cluster)",
+    )
+    start_time: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Optional range start (seconds) for selective timeline re-transcription",
+    )
+    end_time: float | None = Field(
+        default=None,
+        gt=0.0,
+        description="Optional range end (seconds) for selective timeline re-transcription",
+    )
 
 
 class TranscribeResult(BaseModel):
@@ -127,8 +175,70 @@ class TranslateRequest(BaseModel):
     segments: list[SubtitleSegment]
     target_language: str = "vi"
     source_language: str = "auto"
-    provider: Literal["local", "gemini", "openai", "google", "bing"] | None = None
-    style: str = Field(default="short-form video subtitle", description="Tone hint for the LLM")
+    provider: Literal["local", "gemini", "openai", "deepseek", "ollama", "browser", "google", "bing"] | None = None
+    style: str = Field(default="short-form video subtitle", description="Tone hint or genre preset for the LLM")
+    preset: str | None = Field(default=None, description="CapCap genre preset key (e.g. zh_short_drama)")
+    custom_prompt: str | None = Field(default=None, description="Custom system/style prompt override")
+    auto_context: bool = Field(
+        default=False,
+        description="Automatically analyze character identities & two-way address rules before translating",
+    )
+    context_guidance: str | None = Field(
+        default=None,
+        description="Confirmed character profile and two-way pronoun rules injected into every batch",
+    )
+
+
+class ContextAnalyzeRequest(BaseModel):
+    """Analyze dialogue cues to extract character profiles and two-way pronoun rules (ported from CapCap)."""
+
+    segments: list[SubtitleSegment]
+    source_language: str = "auto"
+    target_language: str = "vi"
+    provider: Literal["local", "gemini", "openai", "deepseek", "ollama"] | None = None
+    user_guidance: str = Field(
+        default="",
+        description="User feedback to revise character roles/genders/pronouns (e.g. 'Đảo ngược 2 nhân vật A và B')",
+    )
+    existing_context: str = Field(
+        default="",
+        description="Previous character profile draft to revise when re-analyzing with feedback",
+    )
+
+
+class ContextAnalyzeResult(BaseModel):
+    context: str
+    provider: str
+    model: str
+    sampled_cues: int
+
+
+class SrtImportRequest(BaseModel):
+    """Import an external .srt file (or raw SRT content) as the transcript or secondary track."""
+
+    srt_path: str | None = None
+    content: str | None = None
+
+
+class OcrRegionRequest(BaseModel):
+    """Standalone OCR Translator: read and optionally translate text from any rectangle on a video frame."""
+
+    video_path: str
+    time: float = Field(default=0.0, ge=0.0)
+    region: list[float] = Field(
+        default_factory=lambda: [0.0, 55.0, 100.0, 100.0],
+        description="[left, top, right, bottom] in percent (0..100)",
+    )
+    language: str = "auto"
+    translate_to: str | None = None
+    translate_provider: str | None = None
+
+
+class OcrRegionResult(BaseModel):
+    text: str
+    translation: str = ""
+    engine: str
+    device: str
 
 
 class OcrFrameRequest(BaseModel):
@@ -197,7 +307,7 @@ class DubbingSegmentReport(BaseModel):
     )
 
 
-DubbingProvider = Literal["capcut", "omnivoice", "voicestudio"]
+DubbingProvider = Literal["capcut", "omnivoice", "voicestudio", "elevenlabs"]
 
 
 class DubbingRequest(BaseModel):
@@ -205,10 +315,18 @@ class DubbingRequest(BaseModel):
     use_translation: bool = True
     provider: DubbingProvider | None = None
     voice: str | None = None
+    speaker_voices: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-speaker voice overrides (e.g. {'SPEAKER_00': 'BV075_streaming'})",
+    )
     rate: str | None = Field(default=None, description="Speeding hint, e.g. '+10%' (CapCut only)")
     timing_rewrite: bool = Field(
         default=True,
         description="Borrow following silence and reword over-long lines instead of speeding them up",
+    )
+    trim_silence: bool = Field(
+        default=True,
+        description="Trim excessive leading/trailing silence per CapCap tts_audio_policy before fitting",
     )
     language: str | None = Field(default=None, description="Language being spoken, defaults to the target language")
     video_path: str | None = Field(default=None, description="Source clip, used to length the assembled track")
@@ -278,6 +396,10 @@ class SubtitleStyle(BaseModel):
     horizontal: Literal["left", "center", "right"] = "center"
     margin_v: float = Field(default=7.0, ge=0.0, le=45.0, description="Percent of the height from that edge")
     margin_h: float = Field(default=6.0, ge=0.0, le=45.0, description="Percent of the width from the sides")
+    highlight_mode: Literal["off", "auto", "manual", "both"] = Field(
+        default="off", description="Keyword highlight mode (ported from CapCap)"
+    )
+    highlight_color: str = Field(default="#FACC15", description="Accent hex color for highlighted keywords")
 
     @field_validator("font")
     @classmethod
@@ -286,7 +408,7 @@ class SubtitleStyle(BaseModel):
         cleaned = " ".join(value.replace(",", " ").split())
         return cleaned or "Arial"
 
-    @field_validator("color", "outline_color", "background_color")
+    @field_validator("color", "outline_color", "background_color", "highlight_color")
     @classmethod
     def _css_color(cls, value: str) -> str:
         return _hex(value)
@@ -300,12 +422,44 @@ class SubtitleExportRequest(BaseModel):
     use_translation: bool = True
     font: str | None = None
     style: SubtitleStyle | None = Field(default=None, description="Caption look; None keeps the legacy default")
+    presentation_mode: Literal["none", "single", "bilingual"] = Field(
+        default="single", description="Subtitle presentation mode on video (none | single | bilingual)"
+    )
+    secondary_segments: list[SubtitleSegment] = Field(
+        default_factory=list, description="Secondary subtitle cues (TS2) when presentation_mode == 'bilingual'"
+    )
+    secondary_style: SubtitleStyle | None = Field(
+        default=None, description="Independent caption style for secondary subtitles (TS2)"
+    )
 
 
 class SubtitleExportResult(BaseModel):
     output_path: str
     fmt: str
     lines: int
+
+
+class VisualLayer(BaseModel):
+    """Timed visual overlay on the timeline: blur, mask, logo/image, or text (ported from CapCap)."""
+
+    id: str
+    kind: Literal["blur", "mask", "logo", "text"]
+    start: float = Field(default=0.0, ge=0.0)
+    end: float = Field(default=5.0, gt=0.0)
+    # Normalized rectangle [x, y, width, height] in percent (0..100) of the frame.
+    x: float = Field(default=5.0, ge=0.0, le=100.0)
+    y: float = Field(default=70.0, ge=0.0, le=100.0)
+    width: float = Field(default=90.0, gt=0.0, le=100.0)
+    height: float = Field(default=18.0, gt=0.0, le=100.0)
+    opacity: float = Field(default=1.0, ge=0.0, le=1.0)
+    # Kind-specific parameters
+    blur_strength: int = Field(default=24, ge=2, le=100)
+    color: str = Field(default="#000000")
+    text: str = Field(default="")
+    font_size: int = Field(default=28, ge=8, le=160)
+    image_path: str | None = None
+    locked: bool = False
+    visible: bool = True
 
 
 class RenderRequest(BaseModel):
@@ -323,12 +477,36 @@ class RenderRequest(BaseModel):
         le=1.0,
         description="Level of the original audio under the dub (0 = mute it)",
     )
+    voice_gain: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=2.0,
+        description="Level of the synthesized voice track",
+    )
     keep_original_audio: bool = Field(
         default=False,
         description="Keep the clip's soundtrack in the mix; it is ducked under every dubbed line",
     )
     crf: int = 20
     preset: str = "medium"
+    quality_profile: Literal["balanced", "low"] | None = Field(
+        default=None, description="CapCap compression profile: balanced (CRF 22 / CQ 25) or low (CRF 26 / CQ 28)"
+    )
+    use_nvenc: bool = Field(
+        default=True, description="Prefer NVIDIA NVENC GPU encoding with automatic CPU fallback"
+    )
+    flip_horizontal: bool = Field(
+        default=False, description="Mirror the video horizontally (CapCap Video Inspector)"
+    )
+    layers: list[VisualLayer] = Field(
+        default_factory=list, description="Timed Blur, Mask, Logo, and Text visual layers"
+    )
+    start_time: float | None = Field(
+        default=None, ge=0.0, description="Optional start offset (used by Fast Preview 5s)"
+    )
+    sample_duration: float | None = Field(
+        default=None, gt=0.0, description="Optional clip length in seconds (used by Fast Preview 5s)"
+    )
 
 
 class RenderResult(BaseModel):

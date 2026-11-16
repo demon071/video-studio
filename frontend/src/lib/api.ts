@@ -7,6 +7,7 @@ import type {
   AudioMode,
   CapCutExportResult,
   CapCutTargets,
+  ContextAnalyzeResult,
   DubbingCueResult,
   DubbingRemixResult,
   DubbingResult,
@@ -21,13 +22,18 @@ import type {
   ProjectListResult,
   ProviderTestBody,
   ProviderTestResult,
+  QualityProfile,
+  QueueSnapshot,
   RenderResult,
   SettingsDocument,
   SettingsPatchBody,
+  SubtitlePresentationMode,
   SubtitleSegment,
   SubtitleStyle,
   TranscribeResult,
   TranslateResult,
+  TranslationPreset,
+  VisualLayer,
 } from "@/types/editor";
 
 /** Shared HTTP client for the local Python engine. */
@@ -264,6 +270,14 @@ export interface TranscribeBody {
    * lines the engine already found.
    */
   ocr_fill?: boolean;
+  dedup_enabled?: boolean;
+  dedup_similarity?: number;
+  hallucination_filter_enabled?: boolean;
+  hallucination_silence_threshold?: number;
+  diarize?: boolean;
+  num_speakers?: number;
+  start_time?: number | null;
+  end_time?: number | null;
 }
 
 export async function transcribeVideo(body: TranscribeBody): Promise<TranscribeResult> {
@@ -304,12 +318,67 @@ export interface TranslateBody {
   source_language?: string;
   provider?: string | null;
   style?: string;
+  preset?: string | null;
+  custom_prompt?: string | null;
+  auto_context?: boolean;
+  context_guidance?: string | null;
 }
 
 export async function translateSegments(body: TranslateBody): Promise<TranslateResult> {
   try {
     const { data } = await api.post<TranslateResult>(ENDPOINTS.translate, body, long);
     return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function fetchTranslationPresets(): Promise<TranslationPreset[]> {
+  try {
+    const { data } = await api.get<{ presets: TranslationPreset[] }>(ENDPOINTS.presets);
+    return data.presets ?? [];
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function analyzeDialogueContext(body: {
+  segments: SubtitleSegment[];
+  target_language?: string;
+  provider?: string | null;
+  preset?: string | null;
+}): Promise<ContextAnalyzeResult> {
+  try {
+    const { data } = await api.post<ContextAnalyzeResult>(ENDPOINTS.analyzeContext, body, long);
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function importSrtFile(body: {
+  srt_path?: string | null;
+  srt_content?: string | null;
+}): Promise<TranscribeResult> {
+  try {
+    const { data } = await api.post<TranscribeResult>(ENDPOINTS.importSrt, body);
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function ocrRegionTranslate(body: {
+  video_path: string;
+  timestamp: number;
+  region: [number, number, number, number];
+  source_language?: string;
+  target_language?: string;
+  translate_provider?: string | null;
+}): Promise<{ text: string; translation: string; timestamp: number }> {
+  try {
+    const { data } = await api.post(ENDPOINTS.ocrRegion, body, long);
+    return data as { text: string; translation: string; timestamp: number };
   } catch (error) {
     return fail(error);
   }
@@ -323,6 +392,9 @@ export interface ExportSubtitlesBody {
   use_translation?: boolean;
   /** Caption look; omitting it keeps the engine's plain default. */
   style?: SubtitleStyle | null;
+  presentation_mode?: SubtitlePresentationMode;
+  secondary_segments?: SubtitleSegment[];
+  secondary_style?: SubtitleStyle | null;
 }
 
 export async function exportSubtitles(
@@ -346,6 +418,8 @@ export interface DubbingBody {
   timing_rewrite?: boolean;
   language?: string | null;
   video_path?: string | null;
+  speaker_voices?: Record<string, string>;
+  trim_silence?: boolean;
 }
 
 export async function synthesizeDub(body: DubbingBody): Promise<DubbingResult> {
@@ -413,13 +487,177 @@ export interface RenderBody {
   background_path?: string | null;
   /** Level of the original audio under the dub (0 mutes it). */
   background_gain?: number;
+  voice_gain?: number;
   keep_original_audio?: boolean;
   crf?: number;
+  quality_profile?: QualityProfile | null;
+  use_nvenc?: boolean;
+  flip_horizontal?: boolean;
+  layers?: VisualLayer[];
+  start_time?: number | null;
+  sample_duration?: number | null;
 }
 
 export async function renderVideo(body: RenderBody): Promise<RenderResult> {
   try {
     const { data } = await api.post<RenderResult>(ENDPOINTS.render, body, long);
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function renderFastPreview(body: RenderBody): Promise<RenderResult> {
+  try {
+    const { data } = await api.post<RenderResult>(ENDPOINTS.fastPreview, body, long);
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function exportAudioOnly(body: {
+  output_path: string;
+  mode: "voice" | "bgm" | "mix";
+  dub_track_path?: string | null;
+  background_path?: string | null;
+  video_path?: string | null;
+  background_gain?: number;
+  voice_gain?: number;
+}): Promise<{ output_path: string; mode: string; size_bytes: number }> {
+  try {
+    const { data } = await api.post(ENDPOINTS.exportAudio, body, long);
+    return data as { output_path: string; mode: string; size_bytes: number };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function runMediaTrim(body: {
+  video_path: string;
+  output_path: string;
+  start: number;
+  end: number;
+  reencode?: boolean;
+}): Promise<{ output_path: string }> {
+  try {
+    const { data } = await api.post(ENDPOINTS.mediaTrim, body, long);
+    return data as { output_path: string };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function runMediaConcat(body: {
+  video_paths: string[];
+  output_path: string;
+  reencode?: boolean;
+}): Promise<{ output_path: string }> {
+  try {
+    const { data } = await api.post(ENDPOINTS.mediaConcat, body, long);
+    return data as { output_path: string };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function runMediaDemux(body: {
+  video_path: string;
+  audio_output?: string | null;
+  video_only_output?: string | null;
+}): Promise<{ audio_path?: string; video_path?: string }> {
+  try {
+    const { data } = await api.post(ENDPOINTS.mediaDemux, body, long);
+    return data as { audio_path?: string; video_path?: string };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function runMediaMux(body: {
+  video_path: string;
+  audio_path: string;
+  output_path: string;
+  replace_audio?: boolean;
+  audio_gain?: number;
+}): Promise<{ output_path: string }> {
+  try {
+    const { data } = await api.post(ENDPOINTS.mediaMux, body, long);
+    return data as { output_path: string };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function fetchQueue(): Promise<QueueSnapshot> {
+  try {
+    const { data } = await api.get<QueueSnapshot>(ENDPOINTS.queue);
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function addQueueItems(body: {
+  video_paths: string[];
+  source_mode?: "audio" | "ocr" | "auto";
+  target_language?: string;
+  translate_provider?: string;
+  translate_preset?: string;
+  tts_provider?: string;
+  tts_voice?: string | null;
+  aspect?: "9:16" | "16:9" | "1:1";
+}): Promise<QueueSnapshot> {
+  try {
+    const { data } = await api.post<QueueSnapshot>(ENDPOINTS.queueAdd, body);
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function startQueueBatch(body: {
+  mode: "process_only" | "process_and_export" | "export_selected";
+  item_ids?: string[] | null;
+}): Promise<QueueSnapshot> {
+  try {
+    const { data } = await api.post<QueueSnapshot>(ENDPOINTS.queueStart, body);
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function stopQueueBatch(immediate = false): Promise<QueueSnapshot> {
+  try {
+    const { data } = await api.post<QueueSnapshot>(ENDPOINTS.queueStop, { immediate });
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function removeQueueItem(id: string): Promise<QueueSnapshot> {
+  try {
+    const { data } = await api.delete<QueueSnapshot>(ENDPOINTS.queueItem(id));
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function cleanQueueItem(id: string): Promise<QueueSnapshot> {
+  try {
+    const { data } = await api.post<QueueSnapshot>(ENDPOINTS.queueItemClean(id));
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function clearCompletedQueue(): Promise<QueueSnapshot> {
+  try {
+    const { data } = await api.post<QueueSnapshot>(ENDPOINTS.queueClearCompleted);
     return data;
   } catch (error) {
     return fail(error);

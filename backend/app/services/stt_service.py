@@ -46,6 +46,7 @@ from app.schemas.subtitle import SubtitleSegment, TranscribeRequest, TranscribeR
 from app.services import (
     bcut_client,
     capcut_client,
+    diarization_service,
     model_manager,
     ocr_service,
     provider_config,
@@ -112,6 +113,10 @@ def loaded() -> list[str]:
 
 
 def _load_model(reference: str, device: str, compute_type: str, download_root: Path):
+    hardware.ensure_cuda_dlls()
+    if device == "cuda" and not hardware.ctranslate2_cuda_ready():
+        log.warning("CUDA 12 cublas DLLs missing for ctranslate2 - falling back to CPU int8")
+        device, compute_type = "cpu", "int8"
     key = (reference, device, compute_type)
     with _MODEL_LOCK:
         cached = _MODELS.get(key)
@@ -228,16 +233,22 @@ def _waveform(wav: Path) -> Any:
 
 def _segments_from_cues(cues: list[subtitle_timeline.Cue]) -> list[SubtitleSegment]:
     """Convert the cleaned timeline into the contract the API returns."""
-    return [
-        SubtitleSegment(
-            index=position,
-            start=round(cue.start, 3),
-            end=round(max(cue.end, cue.start + 0.2), 3),
-            text=cue.text,
-            no_speech_prob=cue.no_speech_prob,
+    result: list[SubtitleSegment] = []
+    for position, cue in enumerate(cues, start=1):
+        s = round(cue.start, 3)
+        e = round(max(cue.end, cue.start + 0.2), 3)
+        result.append(
+            SubtitleSegment(
+                index=position,
+                start=s,
+                end=e,
+                text=cue.text,
+                no_speech_prob=cue.no_speech_prob,
+                original_start=s,
+                original_end=e,
+            )
         )
-        for position, cue in enumerate(cues, start=1)
-    ]
+    return result
 
 
 def _cues_from_remote(data: dict[str, Any], fallback_duration: float) -> list[subtitle_timeline.Cue]:
@@ -580,7 +591,11 @@ def _transcribe_local(
         raise SttError("No speech detected in this clip")
 
     if request.polish:
-        cues = subtitle_timeline.polish(cues)
+        cues = subtitle_timeline.polish(
+            cues,
+            dedup_enabled=request.dedup_enabled,
+            dedup_similarity=request.dedup_similarity,
+        )
         report(stage="transcribe", fraction=0.999, message=f"{len(cues)} lines after cleanup")
     segments = _segments_from_cues(cues)
     if not segments:
@@ -649,7 +664,11 @@ def _transcribe_sensevoice(
         raise SttError("No speech detected in this clip")
 
     if request.polish:
-        cues = subtitle_timeline.polish(cues)
+        cues = subtitle_timeline.polish(
+            cues,
+            dedup_enabled=request.dedup_enabled,
+            dedup_similarity=request.dedup_similarity,
+        )
         report(stage="transcribe", fraction=0.999, message=f"{len(cues)} lines after cleanup")
     segments = _segments_from_cues(cues)
     if not segments:
@@ -835,12 +854,15 @@ def _transcribe_ocr(
         settings = settings.model_copy(update={"ocr_language": language})
     try:
         duration = probe_duration(source)
-        lines = ocr_service.transcribe(
-            source,
-            work_dir=settings.temp_path / "ocr" / _job_key(source),
-            report=report,
-            settings=settings,
-        )
+        kwargs: dict[str, Any] = {
+            "work_dir": settings.temp_path / "ocr" / _job_key(source),
+            "report": report,
+            "settings": settings,
+        }
+        if request.start_time is not None or request.end_time is not None:
+            kwargs["start_time"] = float(request.start_time or 0.0)
+            kwargs["end_time"] = request.end_time
+        lines = ocr_service.transcribe(source, **kwargs)
     except ocr_service.OcrError as exc:
         raise SttError(str(exc)) from exc
     except MediaError as exc:
@@ -930,6 +952,9 @@ def _fill_from_ocr(
         report(stage="ocr", fraction=1.0, message="no unread sound left - OCR not needed")
         return outcome, 0
 
+    # Free Whisper's VRAM before launching the ONNX Runtime OCR reader (ported
+    # from 01_TachSub_Studio's run_hybrid), so both stages can use a 4 GB GPU.
+    unload()
     report(stage="ocr", fraction=0.0, message=f"re-reading {len(spans)} unread stretch(es) with OCR")
     try:
         readings = ocr_service.read_windows(
@@ -1044,6 +1069,27 @@ def transcribe(
             outcome, ocr_filled = _fill_from_ocr(
                 source, wav, outcome, request=request, report=report, settings=settings
             )
+
+        if request.diarize:
+            try:
+                turns = diarization_service.diarize(
+                    wav,
+                    num_speakers=request.num_speakers,
+                    report=report,
+                    settings=settings,
+                )
+                if turns:
+                    tagged = diarization_service.assign_speakers(outcome.segments, turns)
+                    outcome = SttOutcome(
+                        language=outcome.language,
+                        duration=outcome.duration,
+                        segments=tagged,
+                        provider=outcome.provider,
+                        model=outcome.model,
+                        device=outcome.device,
+                    )
+            except Exception as exc:  # noqa: BLE001 - diarization is optional
+                log.warning("speaker diarization skipped (%s)", exc)
 
     summary = f"{len(outcome.segments)} lines" + (f" (+{ocr_filled} from OCR)" if ocr_filled else "")
     report(stage="done", fraction=1.0, message=summary)

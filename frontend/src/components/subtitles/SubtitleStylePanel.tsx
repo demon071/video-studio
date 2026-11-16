@@ -1,9 +1,9 @@
-import { Download, Loader2, RotateCcw, Type } from "lucide-react";
+import { BookmarkPlus, Download, Loader2, RotateCcw, Trash2, Type } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { runExportSubtitles } from "@/lib/tasks";
 import { useEditor } from "@/store/editorStore";
-import { DEFAULT_SUBTITLE_STYLE, type SubtitleStyle } from "@/types/editor";
+import { DEFAULT_SUBTITLE_STYLE, type StylePresetItem, type SubtitleStyle } from "@/types/editor";
 
 /** Fonts that are on every Windows install plus the usual design picks. */
 const FONTS = [
@@ -40,12 +40,44 @@ const ALIGNMENTS: Array<{ value: SubtitleStyle["horizontal"]; label: string }> =
  * getting the captions looking right.
  */
 export function SubtitleStylePanel() {
-  const style = useEditor((state) => state.subtitleStyle);
-  const setStyle = useEditor((state) => state.setSubtitleStyle);
+  const activeTrack = useEditor((state) => state.activeSubtitleTrack);
+  const presentationMode = useEditor((state) => state.presentationMode);
+  const primaryStyle = useEditor((state) => state.subtitleStyle);
+  const secondaryStyle = useEditor((state) => state.secondaryStyle);
+  const setPrimaryStyle = useEditor((state) => state.setSubtitleStyle);
+  const setSecondaryStyle = useEditor((state) => state.setSecondaryStyle);
+  const stylePresets = useEditor((state) => state.stylePresets);
+  const update = useEditor((state) => state.update);
+
+  const isSecondary = presentationMode === "bilingual" && activeTrack === 2;
+  const style = isSecondary ? secondaryStyle : primaryStyle;
+  const setStyle = isSecondary ? setSecondaryStyle : setPrimaryStyle;
+
   const lines = useEditor((state) => state.segments.length);
   const exporting = useEditor((state) => Boolean(state.pending.subtitles));
   const [open, setOpen] = useState(false);
+  const [presetName, setPresetName] = useState("");
   const root = useRef<HTMLDivElement>(null);
+
+  const persistPresets = (next: StylePresetItem[]) => {
+    update({ stylePresets: next });
+    try {
+      window.localStorage.setItem("sva_style_presets", JSON.stringify(next));
+    } catch {
+      // ignore storage errors
+    }
+  };
+
+  const handleSavePreset = () => {
+    const name = presetName.trim() || `Preset ${stylePresets.length + 1}`;
+    const item: StylePresetItem = {
+      id: `custom_${Date.now()}`,
+      name,
+      style: { ...style },
+    };
+    persistPresets([...stylePresets, item]);
+    setPresetName("");
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -76,7 +108,9 @@ export function SubtitleStylePanel() {
       {open && (
         <div className="absolute right-0 top-full z-40 mt-1 w-[19rem] space-y-2.5 rounded-lg border border-border bg-surface-2 p-2.5 shadow-panel">
           <div className="flex items-center justify-between">
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Kiểu phụ đề</span>
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+              Kiểu phụ đề {isSecondary ? "(TS2 Song ngữ)" : "(TS1 Chính)"}
+            </span>
             <button
               className="rounded px-1 py-0.5 text-[10px] text-slate-500 hover:bg-surface-3 hover:text-slate-200"
               title="Trở về kiểu mặc định"
@@ -85,6 +119,49 @@ export function SubtitleStylePanel() {
               <RotateCcw size={9} className="mr-1 inline" />
               Mặc định
             </button>
+          </div>
+
+          {/* My Presets (CapCap Style Preset Manager) */}
+          <div className="space-y-1 rounded border border-border/70 bg-surface-1 p-1.5">
+            <span className="text-[9px] font-semibold uppercase tracking-wider text-slate-500">
+              My Presets ({stylePresets.length})
+            </span>
+            <div className="flex flex-wrap gap-1">
+              {stylePresets.map((p) => (
+                <div key={p.id} className="flex items-center overflow-hidden rounded border border-border bg-surface-2">
+                  <button
+                    className="px-1.5 py-0.5 text-[10px] text-slate-300 hover:text-brand"
+                    onClick={() => setStyle(p.style)}
+                  >
+                    {p.name}
+                  </button>
+                  {p.id.startsWith("custom_") && (
+                    <button
+                      className="px-1 text-slate-500 hover:text-rose-400"
+                      onClick={() => persistPresets(stylePresets.filter((item) => item.id !== p.id))}
+                    >
+                      <Trash2 size={9} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-1 pt-0.5">
+              <input
+                className="field flex-1 !px-1.5 !py-0.5 !text-[10px]"
+                value={presetName}
+                placeholder="Tên preset mới…"
+                onChange={(e) => setPresetName(e.target.value)}
+              />
+              <button
+                className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
+                onClick={handleSavePreset}
+                title="Lưu kiểu chữ hiện tại vào My Presets"
+              >
+                <BookmarkPlus size={10} />
+                Lưu
+              </button>
+            </div>
           </div>
 
           <label className="block space-y-1">

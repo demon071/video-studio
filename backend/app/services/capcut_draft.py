@@ -350,6 +350,9 @@ class DraftSpec:
     segments: Sequence[SubtitleSegment] = ()
     style: SubtitleStyle = field(default_factory=SubtitleStyle)
     use_translation: bool = True
+    presentation_mode: str = "single"
+    secondary_segments: Sequence[SubtitleSegment] = ()
+    secondary_style: SubtitleStyle | None = None
     dub_track_path: str | None = None
     dub_segments: Sequence[DubbingSegmentReport] = ()
     keep_original_audio: bool = True
@@ -748,7 +751,7 @@ class _DraftWriter:
 
     # -- captions ----------------------------------------------------------
     def add_captions(self, segments: Sequence[SubtitleSegment], style: SubtitleStyle,
-                     use_translation: bool) -> None:
+                     use_translation: bool, track_name: str = "Phụ đề") -> None:
         ordered = dedupe_overlaps([segment.model_copy(deep=True) for segment in segments], min_gap=0.001)
         texts: list[dict[str, Any]] = []
         for segment in ordered:
@@ -760,7 +763,7 @@ class _DraftWriter:
             duration = max(segment.end - segment.start, 0.2)
             texts.append(self._text_segment(body, segment.start, duration, style))
             self.captions.append((segment.start, segment.end, text))
-        self._track("Phụ đề", "text", texts)
+        self._track(track_name, "text", texts)
 
     def _text_segment(self, text: str, start: float, duration: float, style: SubtitleStyle) -> dict[str, Any]:
         width, height = self.canvas
@@ -1127,9 +1130,17 @@ def export(
         report("Dựng track lồng tiếng", 0.45)
         writer.add_dub(track_path=spec.dub_track_path, segments=spec.dub_segments, volume=1.0)
         report("Dựng phụ đề", 0.65)
-        writer.add_captions(spec.segments, spec.style, spec.use_translation)
-        if not spec.segments:
-            writer.warn("Chưa có phụ đề nào nên draft chỉ có video và lồng tiếng.")
+        if spec.presentation_mode != "none":
+            writer.add_captions(spec.segments, spec.style, spec.use_translation, track_name="Phụ đề")
+            if spec.presentation_mode == "bilingual":
+                sec_style = spec.secondary_style or spec.style.model_copy(
+                    update={"margin_v": min(spec.style.margin_v + 9, 45), "size": max(spec.style.size * 0.8, 0.5)}
+                )
+                sec_segs = spec.secondary_segments or spec.segments
+                use_trans_sec = False if not spec.secondary_segments else True
+                writer.add_captions(sec_segs, sec_style, use_trans_sec, track_name="Phụ đề 2 (TS2)")
+            if not spec.segments:
+                writer.warn("Chưa có phụ đề nào nên draft chỉ có video và lồng tiếng.")
 
         report("Ghi draft_content.json", 0.85)
         writer.write(name=destination.name, fps=info.fps or 30.0, duration=duration)

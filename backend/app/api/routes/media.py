@@ -7,7 +7,16 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from app.api.routes._common import run_job, with_suffix
-from app.schemas.media import ProbeRequest, ProbeResult, ThumbnailRequest, ThumbnailResult
+from app.schemas.media import (
+    MediaConcatRequest,
+    MediaDemuxRequest,
+    MediaMuxRequest,
+    MediaTrimRequest,
+    ProbeRequest,
+    ProbeResult,
+    ThumbnailRequest,
+    ThumbnailResult,
+)
 from app.services import media_processor
 
 router = APIRouter(tags=["media"])
@@ -60,6 +69,86 @@ def thumbnail(request: ThumbnailRequest) -> ThumbnailResult:
         return ThumbnailResult(video_path=str(source), output_path=str(produced)).model_dump(mode="json")
 
     return ThumbnailResult(**run_job("thumbnail", work))
+
+
+@router.post("/api/media/tools/trim")
+def trim_tool(request: MediaTrimRequest) -> dict:
+    """Cut a segment [start, end] from a video file."""
+    def work(report) -> dict:
+        report(stage="media_tools", fraction=0.1, message="Cắt video...")
+        try:
+            produced = media_processor.trim_media(
+                request.video_path,
+                request.output_path,
+                start=request.start,
+                end=request.end,
+                reencode=request.reencode,
+            )
+        except media_processor.MediaError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        report(fraction=1.0, message="Đã cắt xong video")
+        return {"output_path": str(produced)}
+
+    return run_job("media_tools", work)
+
+
+@router.post("/api/media/tools/concat")
+def concat_tool(request: MediaConcatRequest) -> dict:
+    """Concatenate multiple video files in order."""
+    def work(report) -> dict:
+        report(stage="media_tools", fraction=0.1, message="Ghép video...")
+        try:
+            produced = media_processor.concat_media(
+                request.video_paths,
+                request.output_path,
+                reencode=request.reencode,
+            )
+        except media_processor.MediaError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        report(fraction=1.0, message="Đã ghép xong video")
+        return {"output_path": str(produced)}
+
+    return run_job("media_tools", work)
+
+
+@router.post("/api/media/tools/demux")
+def demux_tool(request: MediaDemuxRequest) -> dict:
+    """Extract audio stream and/or mute video stream."""
+    def work(report) -> dict:
+        report(stage="media_tools", fraction=0.1, message="Tách âm thanh / video...")
+        try:
+            outputs = media_processor.extract_streams(
+                request.video_path,
+                audio_output=request.audio_output,
+                video_only_output=request.video_only_output,
+            )
+        except media_processor.MediaError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        report(fraction=1.0, message="Đã tách xong")
+        return outputs
+
+    return run_job("media_tools", work)
+
+
+@router.post("/api/media/tools/mux")
+def mux_tool(request: MediaMuxRequest) -> dict:
+    """Mux audio into video (replace or mix)."""
+    def work(report) -> dict:
+        report(stage="media_tools", fraction=0.1, message="Ghép âm thanh vào video...")
+        try:
+            produced = media_processor.mux_audio_video(
+                request.video_path,
+                request.audio_path,
+                request.output_path,
+                replace_audio=request.replace_audio,
+                audio_gain=request.audio_gain,
+            )
+        except media_processor.MediaError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        report(fraction=1.0, message="Đã ghép xong")
+        return {"output_path": str(produced)}
+
+    return run_job("media_tools", work)
 
 
 __all__ = ["router"]
