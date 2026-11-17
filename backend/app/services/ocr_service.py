@@ -52,7 +52,7 @@ from app.services import media_processor, provider_config
 
 log = logging.getLogger(__name__)
 
-ENGINES = ("rapidocr", "winocr", "paddleocr", "easyocr")
+ENGINES = ("rapidocr", "winocr")
 # Speed/accuracy profiles, mirroring the reference project's two cards:
 # "PP-OCRv6 Small - Chính xác" and "PP-OCRv6 Tiny Det - Nhanh/chuẩn".
 PROFILES = ("small", "tiny")
@@ -530,8 +530,8 @@ def _enable_reusable_detector_preprocess(engine: Any) -> Any:
         return engine
     shared_buffers: dict[tuple[int, ...], dict[str, Any]] = {}
 
-    def get_preprocess(max_side: Any) -> Any:
-        target = original_get_preprocess(max_side)
+    def get_preprocess(*args: Any, **kwargs: Any) -> Any:
+        target = original_get_preprocess(*args, **kwargs)
         return _ReusableDetectorPreProcess(target, shared_buffers)
 
     detector.get_preprocess = get_preprocess
@@ -840,66 +840,6 @@ def _rapidocr(
     return read, used
 
 
-def _paddleocr(language: str, device: str = "cpu") -> tuple[_Reader, str]:
-    try:
-        from paddleocr import PaddleOCR  # noqa: PLC0415 - heavy optional import
-    except ImportError as exc:  # pragma: no cover - optional dependency
-        raise OcrError("paddleocr is not installed (pip install paddleocr paddlepaddle)") from exc
-
-    lang = _LANGS.get(language, _LANGS["auto"])["paddleocr"]
-    used = "cpu"
-    engine = None
-    if device == "gpu":
-        try:
-            engine = PaddleOCR(lang=lang, use_angle_cls=False, show_log=False, use_gpu=True)
-            used = "gpu"
-        except Exception as exc:  # noqa: BLE001 - CPU-only paddlepaddle wheel
-            log.warning("paddleocr GPU unusable (%s) - reading frames on CPU", exc)
-    if engine is None:
-        try:
-            engine = PaddleOCR(lang=lang, use_angle_cls=False, show_log=False)
-        except TypeError:  # pragma: no cover - newer builds dropped show_log
-            engine = PaddleOCR(lang=lang)
-
-    def read(image: Path | Any) -> list[str]:
-        target = str(image) if isinstance(image, Path) else image
-        result = engine.ocr(target, cls=False)
-        page = result[0] if isinstance(result, list) and result else result
-        detections = []
-        for row in page or []:
-            if isinstance(row, (list, tuple)) and len(row) > 1 and isinstance(row[1], (list, tuple)):
-                detections.append((row[0], str(row[1][0]), float(row[1][1]) if len(row[1]) > 1 else 1.0))
-        return _ordered(detections)
-
-    return read, used
-
-
-def _easyocr(language: str, device: str = "cpu") -> tuple[_Reader, str]:
-    try:
-        import easyocr  # noqa: PLC0415 - heavy optional import
-    except ImportError as exc:  # pragma: no cover - optional dependency
-        raise OcrError("easyocr is not installed (pip install easyocr)") from exc
-
-    languages = _LANGS.get(language, _LANGS["auto"])["easyocr"]
-    used = "cpu"
-    engine = None
-    if device == "gpu":
-        try:
-            engine = easyocr.Reader(list(languages), gpu=True)
-            used = "gpu"
-        except Exception as exc:  # noqa: BLE001 - torch build without CUDA
-            log.warning("easyocr GPU unusable (%s) - reading frames on CPU", exc)
-    if engine is None:
-        engine = easyocr.Reader(list(languages), gpu=False)
-
-    def read(image: Path | Any) -> list[str]:
-        target = str(image) if isinstance(image, Path) else image
-        rows = engine.readtext(target)
-        return _ordered([(box, str(text), float(score)) for box, text, score in rows])
-
-    return read, used
-
-
 @dataclass(frozen=True)
 class Engine:
     """A loaded reader plus what it really runs on (the job log says which)."""
@@ -1014,12 +954,8 @@ def load_engine(
         try:
             if candidate == "rapidocr":
                 reader, used = _rapidocr(language, profile, model_folder, wanted_device)
-            elif candidate == "winocr":
-                reader, used = _winocr(language)
-            elif candidate == "paddleocr":
-                reader, used = _paddleocr(language, wanted_device)
             else:
-                reader, used = _easyocr(language, wanted_device)
+                reader, used = _winocr(language)
         except OcrError as exc:
             problems.append(str(exc))
             continue
@@ -1306,34 +1242,8 @@ def transcribe(
 # The gap pass hands the reader a handful of short windows in a single call:
 # building the engine loads the ONNX sessions, which costs more than reading a
 # frame, so it is done once for the whole pass.
-GAP_SAMPLES = 3
-# A hole is sampled at this spacing (capped at MAX_SAMPLES): one-second cues
-# must land on two frames, or the agreement rule below throws them away.
-GAP_STEP = 0.6
-MAX_SAMPLES = 8
-# A hole is only believed when this many of its frames read the same line. One
-# frame alone picks up decoration, logos and half-drawn fades often enough that
-# a single read is not worth a subtitle line.
-MIN_AGREEMENT = 2
-# Nothing read for this many windows in a row means the picture carries no
-# burned-in subtitles at all. Without this the pass would happily spend minutes
-# reading music, logos and empty rooms on a clip that has nothing to find.
-EMPTY_STREAK = 8
-MAX_WINDOWS = 240
-
-
-@dataclass(frozen=True)
-class WindowReading:
-    """What one hole in the transcript read off the picture."""
-
-    start: float
-    end: float
-    text: str
-    candidates: list[str]
-
-
 def _engine_for(settings: Settings) -> Engine:
-    """Build the configured reader; used by both the re-read and the gap pass."""
+    """Build the configured reader for cue/region OCR."""
     return load_engine(
         settings.ocr_engine,
         language=settings.ocr_language,
@@ -1341,122 +1251,6 @@ def _engine_for(settings: Settings) -> Engine:
         model_folder=managed_models(settings),
         device=settings.ocr_device,
     )
-
-
-def _gap_instants(start: float, end: float, minimum: int) -> list[float]:
-    """Instants to sample inside one hole: dense enough to read a line twice."""
-    span = max(float(end) - float(start), 0.2)
-    count = min(max(int(round(span / GAP_STEP)), max(minimum, 1)), MAX_SAMPLES)
-    return cue_offsets(start, end, count)
-
-
-def read_windows(
-    video: str | Path,
-    windows: list[tuple[float, float]],
-    *,
-    work_dir: str | Path,
-    samples: int = GAP_SAMPLES,
-    report: Reporter = NULL_REPORTER,
-    settings: Settings | None = None,
-) -> list[WindowReading]:
-    """Read the picture inside every window that the audio pass left empty.
-
-    This is the mixed extraction the reference project used: recognise the
-    speech from the separated vocal, then ask the frames only about the
-    stretches that carry sound and produced no text. Windows that read nothing
-    are dropped, so the caller can simply append the answers it gets back.
-    """
-    settings = provider_config.overlay(settings or get_settings())
-    source = Path(video)
-    if not source.is_file():
-        raise OcrError(f"Video not found: {source}")
-
-    wanted = [
-        (max(float(start), 0.0), float(end))
-        for start, end in windows
-        if float(end) - float(start) > 0.05
-    ][:MAX_WINDOWS]
-    if not wanted:
-        return []
-
-    region = provider_config.resolved_region(settings)
-    folder = Path(work_dir) / "gaps"
-    engine = _engine_for(settings)
-    cjk = _wanted_cjk(settings.ocr_language)
-    report(stage="ocr", fraction=0.0, message=f"{len(wanted)} window(s) to re-read · {engine.label}")
-
-    readings: list[WindowReading] = []
-    empty = 0
-    try:
-        for position, (start, end) in enumerate(wanted, start=1):
-            instants = _gap_instants(start, end, samples)
-            seen: list[tuple[float, str]] = []
-            span = max(end - start, 0.2)
-            window_fps = max(len(instants) / span, 1.0)
-            try:
-                prev_mask: Any = None
-                prev_line = ""
-                for when, frame in stream_frames(
-                    source,
-                    fps=window_fps,
-                    position=settings.ocr_position or "bottom",
-                    band=settings.ocr_band,
-                    region=region,
-                    start=start,
-                    end=end,
-                    report=report,
-                ):
-                    mask = text_mask(frame)
-                    if frame_unchanged(mask, prev_mask) and prev_line:
-                        line = prev_line
-                    else:
-                        line = _one_script(" ".join(engine.read(frame)), cjk=cjk)
-                    prev_mask, prev_line = mask, line
-                    seen.append((when, line))
-            except (OcrError, media_processor.MediaError):
-                seen = []
-                for index, when in enumerate(instants):
-                    frame_path = grab_frame(
-                        source,
-                        folder / f"gap{position:03d}_{index:02d}.png",
-                        when,
-                        position=settings.ocr_position or "bottom",
-                        band=settings.ocr_band,
-                        region=region,
-                    )
-                    seen.append((when, _one_script(" ".join(engine.read(frame_path)), cjk=cjk)))
-            text, candidates = best_reading(seen)
-            # The winner is only a cue when more than one frame saw it: a single
-            # frame reads a chandelier as letters happily, a cue stays on screen.
-            agreement = sum(1 for _when, value in seen if value and _similar(value, text) >= SIMILARITY)
-            if text and agreement >= min(MIN_AGREEMENT, len(seen)):
-                empty = 0
-                readings.append(
-                    WindowReading(
-                        start=round(start, 3),
-                        end=round(end, 3),
-                        text=text,
-                        candidates=candidates,
-                    )
-                )
-            else:
-                empty += 1
-                text = ""
-            report(
-                stage="ocr",
-                fraction=position / len(wanted),
-                message=f"OCR window {position}/{len(wanted)}" + (f" · {text}" if text else ""),
-            )
-            if empty >= EMPTY_STREAK:
-                report(stage="ocr", fraction=1.0, message="no burned-in subtitle found - stopping")
-                break
-    finally:
-        # One PNG per sample: on a long clip this is the largest thing the pass
-        # writes, and nothing downstream reads them again.
-        shutil.rmtree(folder, ignore_errors=True)
-
-    report(stage="transcribe", fraction=1.0, message=f"OCR recovered {len(readings)} line(s)")
-    return readings
 
 
 @dataclass(frozen=True)
@@ -1520,9 +1314,19 @@ def read_cue(
         raise OcrError(str(exc)) from exc
 
     engine = _engine_for(settings)
+    cjk = _wanted_cjk(settings.ocr_language)
     report(stage="ocr", fraction=0.5, message=f"{len(frames)} frame(s) · {engine.label}")
 
-    readings = [(when, " ".join(engine.read(frame))) for frame, when in zip(frames, instants, strict=True)]
+    readings = [
+        (
+            when,
+            _one_script(
+                sanitize_ocr_line(" ".join(engine.read(frame))),
+                cjk=cjk,
+            ),
+        )
+        for frame, when in zip(frames, instants, strict=True)
+    ]
     text, candidates = best_reading(readings)
     report(stage="ocr", fraction=1.0, message=text or "no text in this frame")
     # The middle frame is what the dialog shows: the very crop the reader saw,
@@ -1589,7 +1393,6 @@ __all__ = [
     "Engine",
     "PROFILES",
     "OcrError",
-    "WindowReading",
     "best_reading",
     "cue_offsets",
     "extract_region_text",
@@ -1604,7 +1407,6 @@ __all__ = [
     "onnx_pack",
     "onnx_providers",
     "read_cue",
-    "read_windows",
     "resolve_device",
     "runtime_info",
     "sample_frames",

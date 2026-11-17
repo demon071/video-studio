@@ -1,9 +1,9 @@
 import { AlertTriangle, RefreshCw } from "lucide-react";
 
+import { RightPanel } from "@/components/layout/RightPanel";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TopBar } from "@/components/layout/TopBar";
 import { PreviewPane } from "@/components/preview/PreviewPane";
-import { SubtitleTable } from "@/components/subtitles/SubtitleTable";
 import { TimelinePane } from "@/components/timeline/TimelinePane";
 import { useEngine } from "@/hooks/useEngine";
 import { useProgressSocket } from "@/hooks/useProgressSocket";
@@ -62,7 +62,7 @@ export default function App() {
         <Sidebar />
         <main className="flex min-w-0 flex-1">
           <PreviewPane />
-          <SubtitleTable />
+          <RightPanel />
         </main>
       </div>
 

@@ -102,7 +102,7 @@ export function SubtitleTable() {
   }
 
   return (
-    <aside className="flex w-[clamp(21rem,27vw,30rem)] shrink-0 flex-col border-l border-border bg-surface-1">
+    <aside className="flex h-full w-full flex-col bg-surface-1">
       <header className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-2.5">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Bảng phụ đề</span>
         <span className="font-mono text-[10px] text-slate-600">{segments.length}</span>

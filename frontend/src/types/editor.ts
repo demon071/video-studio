@@ -6,16 +6,23 @@
  */
 
 export type Aspect = "9:16" | "16:9" | "1:1";
-/** `capcut` / `bilibili` are cloud recognisers, `ocr` reads burned-in subtitles. */
-export type SttProvider = "local" | "sensevoice" | "groq" | "openai" | "capcut" | "bilibili" | "ocr";
-/** `google` / `bing` are the free web translators (no key); `deepseek` / `ollama` from CapCap. */
-export type TranslateProvider = "local" | "gemini" | "openai" | "deepseek" | "ollama" | "google" | "bing";
-/** `capcut` & `elevenlabs` are cloud, `omnivoice` runs on torch and `voicestudio` talks to its local server. */
-export type TtsProvider = "capcut" | "elevenlabs" | "omnivoice" | "voicestudio";
+/** `capcut` is cloud/PC recogniser, `ocr` reads burned-in subtitles, `local` is Whisper, `sensevoice` is offline CPU/ONNX. */
+export type SttProvider = "local" | "sensevoice" | "capcut" | "ocr";
+/** `google` / `bing` are the free web translators (no key); `deepseek` / `ollama` / `gemini` / `openai` from CapCap. */
+export type TranslateProvider = "gemini" | "openai" | "deepseek" | "ollama" | "google" | "bing";
+/** `capcut` & `elevenlabs` are cloud, `omnivoice`, `piper` & `vieneu` run offline (all ported from CapCap). */
+export type TtsProvider = "capcut" | "elevenlabs" | "omnivoice" | "piper" | "vieneu";
 
 export type SubtitlePresentationMode = "none" | "single" | "bilingual";
 export type QualityProfile = "high" | "balanced" | "low";
 export type LayerKind = "mask" | "blur" | "logo" | "text";
+
+export interface VideoClip {
+  id: string;
+  name: string;
+  source_start: number;
+  source_end: number;
+}
 
 export interface VisualLayer {
   id: string;
@@ -29,6 +36,7 @@ export interface VisualLayer {
   h: number;
   color: string;
   opacity: number;
+  blur_strength?: number;
   text: string;
   font_size: number;
   image_path?: string | null;
@@ -90,8 +98,6 @@ export interface TranscribeResult {
   provider: string;
   model: string;
   device: string;
-  /** Lines the OCR pass added on stretches the speech engine left empty. */
-  ocr_filled?: number;
 }
 
 export interface TranslateResult {
@@ -211,12 +217,21 @@ export interface QueueItem {
   output_path?: string | null;
   work_dir?: string | null;
   source_mode: string;
+  stt_provider?: string;
   target_language: string;
   translate_provider: string;
   translate_preset: string;
   tts_provider: string;
   tts_voice?: string | null;
   aspect: string;
+  segments_count?: number;
+}
+
+export interface QueuePreviewResult {
+  item: QueueItem;
+  video_path: string;
+  segments: SubtitleSegment[];
+  dub: DubbingResult | null;
 }
 
 export interface QueueSnapshot {
@@ -466,10 +481,12 @@ export interface ProjectSummary {
   modified: number;
   size_bytes: number;
   damaged: boolean;
+  cached?: boolean;
 }
 
 export interface ProjectListResult {
   projects: ProjectSummary[];
+  cached_projects?: ProjectSummary[];
   folder: string;
 }
 
@@ -622,7 +639,6 @@ export interface SettingsDocument {
   /** `providers.json` on disk, shown at the bottom of the panel. */
   path: string;
   providers: ProviderConfig[];
-  llm: LlmConfig;
   ocr: OcrConfig;
   audio: AudioConfig;
 }
@@ -644,8 +660,6 @@ export interface ProviderPatchBody {
 
 export interface SettingsPatchBody {
   providers?: Record<string, ProviderPatchBody>;
-  /** Offline translator weights: a GGUF filename from the model catalogue. */
-  llm?: { model?: string };
   ocr?: {
     engine?: string;
     profile?: string;

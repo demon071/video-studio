@@ -29,9 +29,8 @@ MODULES = [
     ("openai", "OpenAI / Groq-compatible API"),
 ]
 
-# Dubbing works without these: CapCut needs no package and VoiceStudio is a
-# separate server (http://127.0.0.1:3900/v1), so a miss only costs the ability
-# to pick OmniVoice locally.
+# Dubbing works without these: CapCut needs no package, so a miss only costs
+# the ability to pick OmniVoice locally.
 OPTIONAL = [
     ("omnivoice", "offline TTS (OmniVoice, torch)"),
 ]

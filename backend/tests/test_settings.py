@@ -39,23 +39,23 @@ def _outcome() -> stt_service.SttOutcome:
 # Document: seed, precedence, secret hygiene
 # ---------------------------------------------------------------------------
 def test_environment_seeds_the_document_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GROQ_API_KEY", "env-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     settings = _settings(tmp_path)
 
     document = provider_config.load(settings)
 
-    assert document["providers"]["groq"]["api_key"] == "env-key"
-    assert provider_config.overlay(settings).groq_api_key == "env-key"
+    assert document["providers"]["openai"]["api_key"] == "env-key"
+    assert provider_config.overlay(settings).openai_api_key == "env-key"
 
 
 def test_a_typed_key_wins_over_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GROQ_API_KEY", "env-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     settings = _settings(tmp_path)
 
-    provider_config.save({"providers": {"groq": {"api_key": "typed-key"}}}, settings)
+    provider_config.save({"providers": {"openai": {"api_key": "typed-key"}}}, settings)
 
-    assert provider_config.overlay(settings).groq_api_key == "typed-key"
-    assert provider_config.load(settings)["providers"]["groq"]["api_key"] == "typed-key"
+    assert provider_config.overlay(settings).openai_api_key == "typed-key"
+    assert provider_config.load(settings)["providers"]["openai"]["api_key"] == "typed-key"
 
 
 def test_an_emptied_key_falls_back_to_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,8 +75,7 @@ def test_model_names_reach_settings_fields(tmp_path: Path) -> None:
         {
             "providers": {
                 "gemini": {"model": "gemini-2.5-pro"},
-                "openai": {"model": "gpt-4.1", "stt_model": "gpt-4o-transcribe"},
-                "voicestudio": {"model": "tts-1-hd"},
+                "openai": {"model": "gpt-4.1"},
             }
         },
         settings,
@@ -85,8 +84,6 @@ def test_model_names_reach_settings_fields(tmp_path: Path) -> None:
 
     assert overlaid.gemini_model == "gemini-2.5-pro"
     assert overlaid.openai_chat_model == "gpt-4.1"
-    assert overlaid.openai_stt_model == "gpt-4o-transcribe"
-    assert overlaid.voicestudio_model == "tts-1-hd"
 
 
 def test_custom_base_url_reaches_settings(tmp_path: Path) -> None:
@@ -157,14 +154,14 @@ def test_a_rejected_key_is_reported_with_a_hint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _settings(tmp_path)
-    provider_config.save({"providers": {"groq": {"api_key": "k"}}}, settings)
+    provider_config.save({"providers": {"openai": {"api_key": "k"}}}, settings)
 
     def reject(*_args, **_kwargs):
         raise _http_error(401)
 
     monkeypatch.setattr(provider_config.httpx, "get", reject)
 
-    outcome = provider_config.test_connection("groq", settings)
+    outcome = provider_config.test_connection("openai", settings)
 
     assert outcome.ok is False
     assert "401" in outcome.message
@@ -173,8 +170,8 @@ def test_a_rejected_key_is_reported_with_a_hint(
 
 def test_a_working_key_lists_the_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _settings(tmp_path)
-    provider_config.save({"providers": {"groq": {"api_key": "k"}}}, settings)
-    payload = {"data": [{"id": "whisper-large-v3-turbo"}, {"id": "whisper-large-v3"}]}
+    provider_config.save({"providers": {"openai": {"api_key": "k"}}}, settings)
+    payload = {"data": [{"id": "gpt-4.1-mini"}, {"id": "gpt-4.1"}]}
     request = httpx.Request("GET", "https://example.invalid/models")
     monkeypatch.setattr(
         provider_config.httpx,
@@ -182,10 +179,10 @@ def test_a_working_key_lists_the_models(tmp_path: Path, monkeypatch: pytest.Monk
         lambda *a, **k: httpx.Response(200, json=payload, request=request),
     )
 
-    outcome = provider_config.test_connection("groq", settings)
+    outcome = provider_config.test_connection("openai", settings)
 
     assert outcome.ok is True
-    assert outcome.models == ["whisper-large-v3", "whisper-large-v3-turbo"]
+    assert outcome.models == ["gpt-4.1", "gpt-4.1-mini"]
 
 
 def test_an_override_is_tested_before_it_is_saved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -552,44 +549,4 @@ def test_the_saved_mode_is_used_when_the_request_stays_silent(
     assert used["wav"] == vocal
 
 
-# ---------------------------------------------------------------------------
-# Offline translator: which GGUF runs
-# ---------------------------------------------------------------------------
-def _llm_settings(tmp_path: Path) -> Settings:
-    # An isolated models_dir, otherwise the machine's real GGUFs decide `installed`.
-    return Settings(data_dir=str(tmp_path / "data"), models_dir=str(tmp_path / "models"))
 
-
-def test_the_offline_model_choice_round_trips(tmp_path: Path) -> None:
-    settings = _llm_settings(tmp_path)
-
-    provider_config.save({"llm": {"model": "gemma-3-4b-it-q4_k_m.gguf"}}, settings)
-
-    assert provider_config.overlay(settings).llm_model_file == "gemma-3-4b-it-q4_k_m.gguf"
-    described = provider_config.describe(settings)["llm"]
-    assert described["model"] == "gemma-3-4b-it-q4_k_m.gguf"
-    assert described["ready"] is False  # nothing downloaded under this models_dir
-    assert [option["filename"] for option in described["options"]] == [
-        "qwen2.5-3b-instruct-q4_k_m.gguf",
-        "gemma-3-4b-it-q4_k_m.gguf",
-    ]
-    assert [option["active"] for option in described["options"]] == [False, True]
-
-
-def test_an_unknown_offline_model_is_rejected_at_save(tmp_path: Path) -> None:
-    settings = _llm_settings(tmp_path)
-
-    with pytest.raises(provider_config.ProviderConfigError, match="không hợp lệ"):
-        provider_config.save({"llm": {"model": "gemma-3-4b.gguf"}}, settings)
-
-
-def test_an_empty_offline_choice_returns_to_the_engine_default(tmp_path: Path) -> None:
-    settings = _llm_settings(tmp_path)
-    provider_config.save({"llm": {"model": "gemma-3-4b-it-q4_k_m.gguf"}}, settings)
-
-    provider_config.save({"llm": {"model": ""}}, settings)
-
-    assert provider_config.overlay(settings).llm_model_file == settings.llm_model_file
-    described = provider_config.describe(settings)["llm"]
-    assert described["model"] == settings.llm_model_file
-    assert [option["active"] for option in described["options"]] == [True, False]

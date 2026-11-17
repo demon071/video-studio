@@ -37,8 +37,6 @@ def test_model_catalogue_is_complete(client: TestClient) -> None:
     keys = {model["key"] for model in payload["models"]}
     assert {
         "whisper-medium",
-        "qwen2.5-3b-instruct-q4_k_m",
-        "gemma3-4b-it-q4_k_m",
         "uvr-mdx-inst-hq3",
     } <= keys
     assert all(model["path"] for model in payload["models"])
@@ -61,27 +59,10 @@ def test_settings_surface_lists_providers_without_keys(client: TestClient) -> No
     payload = client.get("/api/settings").json()
 
     names = [item["name"] for item in payload["providers"]]
-    assert names == ["gemini", "openai", "groq", "voicestudio"]
+    assert names == ["gemini", "openai", "deepseek", "ollama"]
     assert all("api_key" not in item for item in payload["providers"])
     assert payload["ocr"]["profile"] in {"small", "tiny"}
     assert payload["audio"]["mode"] in {"fast", "clean"}
-    assert len(payload["llm"]["options"]) >= 2  # Qwen2.5 3B and Gemma 3 4B
-
-
-def test_settings_store_the_offline_gguf(client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Picking Gemma in the panel must survive the round-trip and reach the service."""
-    isolated = Settings(data_dir=str(tmp_path / "data"), models_dir=str(tmp_path / "models"))
-    monkeypatch.setattr(provider_config, "get_settings", lambda: isolated)
-
-    stored = client.put("/api/settings", json={"llm": {"model": "gemma-3-4b-it-q4_k_m.gguf"}})
-    assert stored.status_code == 200
-    assert stored.json()["llm"]["model"] == "gemma-3-4b-it-q4_k_m.gguf"
-    assert provider_config.overlay(isolated).llm_model_file == "gemma-3-4b-it-q4_k_m.gguf"
-
-    # A name no catalogue entry can download is refused now, not on the first translation.
-    broken = client.put("/api/settings", json={"llm": {"model": "gemma-3-4b.gguf"}})
-    assert broken.status_code == 400
-    assert "Model dịch offline" in broken.json()["detail"]
 
 
 def test_settings_reject_an_unknown_provider(client: TestClient) -> None:

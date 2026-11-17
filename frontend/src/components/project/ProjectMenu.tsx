@@ -29,6 +29,7 @@ function stamp(row: ProjectSummary): string {
 export function ProjectMenu() {
   const [open, setOpen] = useState(false);
   const [rows, setRows] = useState<ProjectSummary[]>([]);
+  const [cachedRows, setCachedRows] = useState<ProjectSummary[]>([]);
   const [folder, setFolder] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,9 +44,11 @@ export function ProjectMenu() {
     try {
       const listing = await listProjects();
       setRows(listing.projects);
+      setCachedRows(listing.cached_projects ?? []);
       setFolder(listing.folder);
     } catch (problem) {
       setRows([]);
+      setCachedRows([]);
       setError(problem instanceof Error ? problem.message : String(problem));
     } finally {
       setLoading(false);
@@ -130,40 +133,75 @@ export function ProjectMenu() {
             {loading && <Loader2 size={10} className="animate-spin text-slate-500" />}
           </div>
 
-          <div className="max-h-72 overflow-y-auto">
+          <div className="max-h-80 overflow-y-auto">
             {error ? (
               <p className="px-3 py-2 text-[11px] leading-relaxed text-rose-300">{error}</p>
-            ) : rows.length === 0 ? (
+            ) : rows.length === 0 && cachedRows.length === 0 ? (
               <p className="px-3 py-3 text-[11px] leading-relaxed text-slate-500">
                 Chưa có dự án nào. Nhấn “Lưu” (Ctrl+S) để tạo tệp đầu tiên — mọi thay đổi cũng được tự động
                 giữ lại khi đóng app.
               </p>
             ) : (
-              rows.map((row) => (
-                <div
-                  key={row.path}
-                  className={`group flex items-center gap-2 px-2 py-1.5 ${
-                    row.path === activePath ? "bg-brand/10" : "hover:bg-surface-3"
-                  }`}
-                >
-                  <button className="min-w-0 flex-1 text-left" onClick={() => void openRow(row)}>
-                    <div className="truncate text-[11px] text-slate-200">
-                      {row.name}
-                      {row.damaged && <span className="ml-1 text-rose-400">(hỏng)</span>}
-                    </div>
-                    <div className="truncate font-mono text-[10px] text-slate-500">
-                      {stamp(row)} · {formatBytes(row.size_bytes)} · {row.path}
-                    </div>
-                  </button>
-                  <button
-                    className="shrink-0 rounded p-1 text-slate-500 opacity-0 transition-opacity hover:text-rose-300 group-hover:opacity-100"
-                    title="Xoá dự án"
-                    onClick={() => void removeRow(row)}
+              <>
+                {rows.map((row) => (
+                  <div
+                    key={row.path}
+                    className={`group flex items-center gap-2 px-2 py-1.5 ${
+                      row.path === activePath ? "bg-brand/10" : "hover:bg-surface-3"
+                    }`}
                   >
-                    <Trash2 size={11} />
-                  </button>
-                </div>
-              ))
+                    <button className="min-w-0 flex-1 text-left" onClick={() => void openRow(row)}>
+                      <div className="truncate text-[11px] text-slate-200">
+                        {row.name}
+                        {row.damaged && <span className="ml-1 text-rose-400">(hỏng)</span>}
+                      </div>
+                      <div className="truncate font-mono text-[10px] text-slate-500">
+                        {stamp(row)} · {formatBytes(row.size_bytes)} · {row.path}
+                      </div>
+                    </button>
+                    <button
+                      className="shrink-0 rounded p-1 text-slate-500 opacity-0 transition-opacity hover:text-rose-300 group-hover:opacity-100"
+                      title="Xoá dự án"
+                      onClick={() => void removeRow(row)}
+                    >
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
+                ))}
+
+                {cachedRows.length > 0 && (
+                  <>
+                    <div className="border-y border-border bg-surface-1 px-3 py-1 text-[10px] uppercase tracking-wide text-amber-300/80">
+                      Đã cache trước đó (chưa lưu file)
+                    </div>
+                    {cachedRows.map((row) => (
+                      <div
+                        key={row.path}
+                        className="group flex items-center gap-2 px-2 py-1.5 hover:bg-surface-3"
+                      >
+                        <button className="min-w-0 flex-1 text-left" onClick={() => void openRow(row)}>
+                          <div className="flex items-center gap-1.5 truncate text-[11px] text-slate-200">
+                            <span className="shrink-0 rounded bg-amber-500/20 px-1 py-0.2 text-[9px] font-medium text-amber-300">
+                              Nháp
+                            </span>
+                            <span className="truncate">{row.name}</span>
+                          </div>
+                          <div className="truncate font-mono text-[10px] text-slate-500">
+                            {stamp(row)} · {formatBytes(row.size_bytes)}
+                          </div>
+                        </button>
+                        <button
+                          className="shrink-0 rounded p-1 text-slate-500 opacity-0 transition-opacity hover:text-rose-300 group-hover:opacity-100"
+                          title="Xoá bản nháp cache"
+                          onClick={() => void removeRow(row)}
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </>
             )}
           </div>
 

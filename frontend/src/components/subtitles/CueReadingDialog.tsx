@@ -21,6 +21,15 @@ import type { OcrFrameResult, SubtitleSegment } from "@/types/editor";
  * The still under the header is the exact crop the reader saw, so a scan
  * rectangle that misses the line is visible instead of guessed.
  */
+const OCR_LANGUAGES = [
+  { value: "auto", label: "Tự động" },
+  { value: "zh", label: "Tiếng Trung" },
+  { value: "vi", label: "Tiếng Việt" },
+  { value: "en", label: "English" },
+  { value: "ja", label: "日本語" },
+  { value: "ko", label: "한국어" },
+];
+
 export function CueReadingDialog({
   segment,
   onClose,
@@ -29,12 +38,13 @@ export function CueReadingDialog({
   onClose: () => void;
 }) {
   const videoPath = useEditor((state) => state.source?.path ?? "");
-  const language = useEditor((state) => state.sourceLanguage);
+  const storeLanguage = useEditor((state) => state.sourceLanguage);
   const patchSegment = useEditor((state) => state.patchSegment);
   const pushLog = useEditor((state) => state.pushLog);
   const beginTask = useEditor((state) => state.beginTask);
   const endTask = useEditor((state) => state.endTask);
 
+  const [ocrLanguage, setOcrLanguage] = useState(storeLanguage || "auto");
   const [reading, setReading] = useState(true);
   const [result, setResult] = useState<OcrFrameResult | null>(null);
   const [chosen, setChosen] = useState("");
@@ -44,7 +54,7 @@ export function CueReadingDialog({
   // the run id, so the spinner can never get stuck and the last read wins.
   const runId = useRef(0);
 
-  const read = async () => {
+  const read = async (langOverride?: string) => {
     const current = (runId.current += 1);
     setReading(true);
     setError(null);
@@ -54,7 +64,7 @@ export function CueReadingDialog({
         video_path: videoPath,
         start: segment.start,
         end: segment.end,
-        language,
+        language: langOverride ?? ocrLanguage,
       });
       if (current !== runId.current) return;
       setResult(outcome);
@@ -167,7 +177,8 @@ export function CueReadingDialog({
 
               <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[9px] text-slate-500">
                 <span>
-                  {result.engine} · {result.device === "gpu" ? "GPU" : "CPU"}
+                  {result.engine === "winocr" ? "Windows Media OCR" : "RapidOCR"} ·{" "}
+                  {result.device === "gpu" ? "GPU" : "CPU"}
                 </span>
                 <span>{result.frames.length} khung</span>
                 {left !== undefined && (
@@ -236,6 +247,23 @@ export function CueReadingDialog({
         </div>
 
         <footer className="flex shrink-0 items-center gap-2 border-t border-border px-3 py-2">
+          <select
+            className="field !w-28 !px-1.5 !py-0.5 !text-[10px]"
+            value={ocrLanguage}
+            disabled={reading}
+            title="Ngôn ngữ OCR dùng khi đọc lại khung này"
+            onChange={(event) => {
+              const nextLang = event.target.value;
+              setOcrLanguage(nextLang);
+              void read(nextLang);
+            }}
+          >
+            {OCR_LANGUAGES.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
           <button className="btn-ghost !px-2 !py-1 !text-[10px]" onClick={() => void read()} disabled={reading}>
             {reading ? <Loader2 size={10} className="animate-spin" /> : <ScanText size={10} />}
             Đọc lại

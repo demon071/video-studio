@@ -32,8 +32,10 @@ sherpa-onnx>=1.12
 onnxruntime>=1.32,<2.0
 
 # --- TTS (offline) ---
-# Nothing to install for the default dub: CapCut's voices are plain HTTPS calls.
-# The offline engines are optional extras:
+# CapCut and ElevenLabs are plain HTTPS calls. Piper and VieNeu run offline:
+piper-tts>=1.3
+vietnormalizer>=0.2
+vieneu>=3.8.4,<4
 #
 #   OmniVoice (github.com/k2-fsa/OmniVoice) runs in-process on torch:
 #     pip install torchaudio==2.11.1 --no-deps
@@ -44,23 +46,20 @@ onnxruntime>=1.32,<2.0
 #   CPU 2.11 one. --no-deps installs the wheel alone and it imports and resamples
 #   fine against torch 2.14; `omnivoice` imports it at module level, so it is
 #   mandatory even though we never call it directly.
+#   Piper TTS (offline ONNX, model .onnx trong models\piper\):
+#     pip install piper-tts vietnormalizer
+#
+#   VieNeu-TTS (offline tiếng Việt + clone giọng):
+#     pip install vieneu
+#
 #   The weights (k2-fsa/OmniVoice, 3.3 GB) land in models\tts\omnivoice-v1 on the
 #   first dubbed line.
-#
-#   VoiceStudio (github.com/debpalash/voicestudio) is a separate local server
-#   exposing the OpenAI speech API on http://127.0.0.1:3900/v1: no package here,
-#   just start it (Docker image ghcr.io/debpalash/voicestudio) and pick
-#   "VoiceStudio" in the AI panel.
 
 # --- Vocal isolation (keep background music under the dub) ---
 # MDX-Net models run on ONNX Runtime; pulls librosa + extra audio libs.
 audio-separator>=0.48,<1.0
 
-# --- Translation (offline LLM, GGUF / Qwen2.5 · Gemma 3) ---
-# Prebuilt Windows wheels: https://abetlen.github.io/llama-cpp-python/whl/cpu
-llama-cpp-python>=0.3.36
-
-# --- Online providers (used when provider=api) ---
+# --- Online providers (used for translation) ---
 openai>=3.50
 google-genai>=3.3
 
@@ -71,14 +70,12 @@ google-genai>=3.3
 #   provider=ocr       -> one OCR engine (first match wins, see SVA_OCR_ENGINE)
 #   provider=omnivoice -> pip install omnivoice (see "TTS (offline)" above)
 #
-# CapCut and Bilibili BCut need no package: both are plain HTTPS calls.
+# CapCut needs no extra package: it uses plain HTTPS / CapCut PC transport.
 # rapidocr is the small, ONNX-only engine and downloads its models on first
 # use. The `rapidocr` package resolves multilingual models from a language
 # code (SVA_OCR_LANGUAGE=vi), the older `rapidocr-onnxruntime` wheel ships the
 # Chinese pair only and drops Vietnamese diacritics - prefer `rapidocr`.
 # pip install rapidocr
-# pip install paddleocr        # pulls PaddlePaddle (~700 MB)
-# pip install easyocr          # pulls torchvision
 #
 # --- GPU for OCR: one ONNX Runtime build at a time --------------------------
 # `onnxruntime` (above) is the CPU wheel OCR uses by default and the one the

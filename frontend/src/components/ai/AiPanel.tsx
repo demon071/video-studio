@@ -58,7 +58,33 @@ const VOICES: Record<TtsProvider, Array<{ value: string; label: string }>> = {
     { value: "BV560_streaming", label: "Alex Đại Đế (nam, VI)" },
   ],
   omnivoice: [{ value: "auto", label: "Tự động (model chọn giọng)" }],
-  voicestudio: [{ value: "alloy", label: "alloy (mặc định của server)" }],
+  piper: [
+    { value: "vi_VN-vais1000-medium", label: "vi_VN-vais1000-medium (VI)" },
+    { value: "banmai", label: "Ban Mai (VI)" },
+    { value: "ngochuyen", label: "Ngọc Huyền (VI)" },
+  ],
+  vieneu: [
+    { value: "Ngọc Huyền", label: "Ngọc Huyền (Nữ · Bắc · Tự nhiên)" },
+    { value: "Minh Đức", label: "Minh Đức (Nam · Bắc · Tin tức)" },
+    { value: "Phạm Tuyên", label: "Phạm Tuyên (Nam · Bắc · Trầm ấm)" },
+    { value: "Thái Sơn", label: "Thái Sơn (Nam · Nam · Kể chuyện)" },
+    { value: "Xuân Vĩnh", label: "Xuân Vĩnh (Nam · Nam · Dẫn chuyện)" },
+    { value: "Thanh Bình", label: "Thanh Bình (Nam · Bắc · Sách nói)" },
+    { value: "Trúc Ly", label: "Trúc Ly (Nữ · Bắc · Trẻ trung)" },
+    { value: "Ngọc Linh", label: "Ngọc Linh (Nữ · Bắc · Diễn cảm)" },
+    { value: "Đoan Trang", label: "Đoan Trang (Nữ · Bắc · Trong trẻo)" },
+    { value: "Mai Anh", label: "Mai Anh (Nữ · Bắc · Bản tin)" },
+    { value: "Thục Đoan", label: "Thục Đoan (Nữ · Nam · Ngọt ngào)" },
+    { value: "Minh Triết", label: "Minh Triết (Nam · Nam · Thời sự)" },
+    { value: "Thùy Dung", label: "Thùy Dung (Nữ · Nam · Phóng sự)" },
+    { value: "Quang Sơn", label: "Quang Sơn (Nam · Trung · Ấm áp)" },
+    { value: "Ngọc Trân", label: "Ngọc Trân (Nữ · Trung · Dịu dàng)" },
+    { value: "Mỹ Duyên", label: "Mỹ Duyên (Nữ · Nam · Sâu lắng)" },
+    { value: "Quỳnh Anh", label: "Quỳnh Anh (Nữ · Bắc · Tâm sự)" },
+    { value: "Đức Trí", label: "Đức Trí (Nam · Nam · Thuyết minh)" },
+    { value: "Kim Thanh", label: "Kim Thanh (Nữ · Nam · Tiểu thuyết)" },
+    { value: "Adam", label: "Adam (Nam · Nam · Năng động)" },
+  ],
   elevenlabs: [
     { value: "21m00Tcm4TlvDq8ikWAM", label: "Rachel (ElevenLabs)" },
     { value: "pNInz6obpgDQGcFmaJgB", label: "Adam (ElevenLabs)" },
@@ -66,16 +92,16 @@ const VOICES: Record<TtsProvider, Array<{ value: string; label: string }>> = {
 };
 
 /** Free-text voices: a described voice, a sample path or a server voice id. */
-const FREE_VOICE: TtsProvider[] = ["omnivoice", "voicestudio", "elevenlabs"];
+const FREE_VOICE: TtsProvider[] = ["omnivoice", "elevenlabs", "piper"];
 
 const VOICE_PLACEHOLDER: Partial<Record<TtsProvider, string>> = {
   omnivoice: "auto · design:nữ, giọng trầm, chậm · clone:D:\\giong.wav",
-  voicestudio: "alloy",
   elevenlabs: "Voice ID ElevenLabs (vd: 21m00Tcm4TlvDq8ikWAM)",
+  piper: "Tên file .onnx trong models/piper/ (vd: vi_VN-vais1000-medium)",
 };
 
 /** Providers that accept a speaking rate. */
-const RATE_PROVIDERS: TtsProvider[] = ["capcut"];
+const RATE_PROVIDERS: TtsProvider[] = ["capcut", "piper"];
 
 export function AiPanel() {
   const source = useEditor((state) => state.source);
@@ -99,7 +125,6 @@ export function AiPanel() {
   const keepOriginalAudio = useEditor((state) => state.keepOriginalAudio);
   const duckGain = useEditor((state) => state.duckGain);
   const audioMode = useEditor((state) => state.audioMode);
-  const ocrFill = useEditor((state) => state.ocrFill);
   const dedupEnabled = useEditor((state) => state.dedupEnabled);
   const hallucinationFilter = useEditor((state) => state.hallucinationFilter);
   const diarize = useEditor((state) => state.diarize);
@@ -194,10 +219,7 @@ export function AiPanel() {
             >
               <option value="local">Offline (faster-whisper)</option>
               <option value="sensevoice">SenseVoice (offline, nhanh)</option>
-              <option value="groq">Groq API</option>
-              <option value="openai">OpenAI API</option>
-              <option value="capcut">CapCut (cloud, không cần key)</option>
-              <option value="bilibili">Bilibili BCut (cloud)</option>
+              <option value="capcut">CapCut (cloud/PC, không cần key)</option>
               <option value="ocr">OCR — đọc phụ đề cứng</option>
             </select>
           </Labelled>
@@ -248,9 +270,9 @@ export function AiPanel() {
           </Hint>
         )}
 
-        {(sttProvider === "capcut" || sttProvider === "bilibili") && (
+        {sttProvider === "capcut" && (
           <Hint tone="info" icon={<TriangleAlert size={10} />}>
-            Gửi âm thanh lên {sttProvider === "capcut" ? "CapCut" : "Bilibili BCut"} — cần internet, không cần API key.
+            Gửi âm thanh lên CapCut (Web hoặc CapCut PC) — không cần API key.
             Nhận dạng tiếng Trung tốt hơn whisper small.
           </Hint>
         )}
@@ -294,11 +316,6 @@ export function AiPanel() {
         {sttProvider !== "ocr" && (
           <div className="space-y-1.5 text-[11px] text-slate-400">
             <Toggle
-              checked={ocrFill}
-              onChange={(value) => update({ ocrFill: value })}
-              label="Đọc lại bằng OCR đoạn có tiếng mà thiếu chữ"
-            />
-            <Toggle
               checked={dedupEnabled}
               onChange={(value) => update({ dedupEnabled: value })}
               label="Gộp câu trùng lặp ở biên đoạn (CapCap ASR Dedup)"
@@ -313,15 +330,6 @@ export function AiPanel() {
               onChange={(value) => update({ diarize: value })}
               label="Phân biệt người nói (Speaker Diarization)"
             />
-            {ocrFill && (
-              <Hint tone="info" icon={<TriangleAlert size={10} />}>
-                Sau khi nhận dạng giọng nói, engine tìm những quãng vẫn có âm thanh nhưng chưa ra
-                dòng nào rồi đọc phụ đề in sẵn trên hình đúng ở quãng đó. Vùng quét và ngôn ngữ lấy
-                từ tab Cài đặt — phim Trung có phụ đề Việt thì chọn ngôn ngữ OCR là Tiếng Việt, đọc
-                bằng model Trung sẽ mất dấu. Thiếu engine OCR thì bước này tự bỏ qua, phần đã nhận
-                dạng giữ nguyên.
-              </Hint>
-            )}
           </div>
         )}
 
@@ -383,13 +391,12 @@ export function AiPanel() {
               value={translateProvider}
               onChange={(event) => update({ translateProvider: event.target.value as TranslateProvider })}
             >
-              <option value="local">Offline (GGUF trên máy)</option>
+              <option value="google">Google Dịch (miễn phí)</option>
+              <option value="bing">Bing Dịch (miễn phí)</option>
               <option value="gemini">Gemini API</option>
               <option value="deepseek">DeepSeek API</option>
               <option value="openai">OpenAI API</option>
               <option value="ollama">Ollama (Local Server)</option>
-              <option value="google">Google Dịch (miễn phí)</option>
-              <option value="bing">Bing Dịch (miễn phí)</option>
             </select>
           </Labelled>
         </div>
@@ -494,7 +501,8 @@ export function AiPanel() {
               <option value="capcut">CapCut (cloud, giọng Việt)</option>
               <option value="elevenlabs">ElevenLabs (cloud, đa ngôn ngữ)</option>
               <option value="omnivoice">OmniVoice (offline, 600+ ngôn ngữ)</option>
-              <option value="voicestudio">VoiceStudio (server nội bộ)</option>
+              <option value="piper">Piper TTS (offline ONNX)</option>
+              <option value="vieneu">VieNeu-TTS (offline tiếng Việt)</option>
             </select>
           </Labelled>
           <Labelled label="Tốc độ">
@@ -553,19 +561,21 @@ export function AiPanel() {
           <PanelLink tab="models">Xem gói OmniVoice trong tab Model</PanelLink>
         )}
 
-        {ttsProvider === "voicestudio" && (
+        {ttsProvider === "piper" && (
           <Hint tone="info" icon={<TriangleAlert size={10} />}>
-            Cần server VoiceStudio chạy sẵn ở 127.0.0.1:3900 (VoiceStudio → Local API). Đổi địa
-            chỉ trong Settings nếu chạy Docker hoặc máy khác.
+            Piper TTS chạy offline ONNX siêu nhẹ (cần cài gói <code>piper-tts</code> và đặt file
+            <code>.onnx</code> vào thư mục <code>models/piper/</code>).
           </Hint>
         )}
 
-        {ttsProvider === "voicestudio" && (
-          <PanelLink>Cấu hình VoiceStudio trong tab Cài đặt</PanelLink>
+        {ttsProvider === "vieneu" && (
+          <Hint tone="info" icon={<TriangleAlert size={10} />}>
+            VieNeu-TTS chạy offline chuyên tiếng Việt (cần cài gói <code>vieneu</code>; hỗ trợ 20
+            giọng mẫu hoặc <code>clone:&lt;đường dẫn wav&gt;</code>).
+          </Hint>
         )}
 
-        {/* The local VoiceStudio server needs no key; a remote one is set up in Settings. */}
-        {ttsProvider !== "voicestudio" && <KeyNotice provider={ttsProvider} />}
+        <KeyNotice provider={ttsProvider} />
 
         <div className="space-y-1.5 text-[11px] text-slate-400">
           <Toggle

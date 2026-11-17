@@ -22,17 +22,8 @@ class ProviderPatch(BaseModel):
     )
 
 
-class LlmPatch(BaseModel):
-    """Offline translator weights: a GGUF filename from the model catalogue."""
-
-    model: str | None = Field(
-        default=None,
-        description="Tên tệp GGUF (vd. gemma-3-4b-it-q4_k_m.gguf); chuỗi rỗng về bản mặc định",
-    )
-
-
 class OcrPatch(BaseModel):
-    engine: str | None = Field(default=None, description="rapidocr | paddleocr | easyocr")
+    engine: str | None = Field(default=None, description="rapidocr | winocr")
     profile: str | None = Field(default=None, description="small (chính xác) | tiny (nhanh)")
     region: str | None = Field(
         default=None,
@@ -58,7 +49,6 @@ class SettingsPatch(BaseModel):
     """Partial update of ``providers.json``."""
 
     providers: dict[str, ProviderPatch] = Field(default_factory=dict)
-    llm: LlmPatch | None = None
     ocr: OcrPatch | None = None
     audio: AudioPatch | None = None
 
@@ -80,8 +70,6 @@ class SettingsPatch(BaseModel):
                 values["base_url"] = patch.base_url.strip()
             providers[name] = values
         document: dict = {"providers": providers}
-        if self.llm is not None:
-            document["llm"] = {k: v for k, v in self.llm.model_dump().items() if v is not None}
         if self.ocr is not None:
             document["ocr"] = {k: v for k, v in self.ocr.model_dump().items() if v is not None}
         if self.audio is not None:

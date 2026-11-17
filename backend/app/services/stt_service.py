@@ -1,57 +1,33 @@
-"""Speech-to-text: faster-whisper locally, Groq/OpenAI Whisper remotely.
+"""Speech-to-text & subtitle extraction (ported from CapCap v9.0.1).
 
-``sensevoice`` is the second offline route (:mod:`app.services.sensevoice_stt`):
-SenseVoice reads zh / en / ja / ko / yue on CPU with punctuation, and it has no
-language to guess wrong - whisper called one Chinese episode "ru" from its music
-intro and wrote every line in Russian.
-
-Two more routes exist for clips whose original subtitles matter more than the
-audio:
-
-* ``capcut`` / ``bilibili`` - the cloud recognisers behind the two editors
-  (see :mod:`app.services.capcut_client` and :mod:`app.services.bcut_client`),
-  which are strong on Chinese drama and need no key.
-* ``ocr`` - reading the burned-in subtitles off the picture
-  (:mod:`app.services.ocr_service`).
-
-The two halves can also be *mixed*: ``ocr_fill`` transcribes the speech first,
-then hands every stretch that carries sound but produced no line to the frame
-reader (:func:`_fill_from_ocr`). Whisper regularly drops a whole window when
-the first second of it is music, and the original subtitle is still drawn on
-the picture - which is where the reference project's re-listen pass and this
-one's re-read pass agree.
-
-The model instance is cached per (checkpoint, device, compute type) so a second
-transcription in the same session starts instantly. Whisper lines are published
-to the UI as they are decoded, which is what makes the subtitle panel fill in
-live instead of showing a spinner for a minute.
+Supports CapCap's four subtitle extraction engines:
+* ``local``      - Faster-Whisper (standard + BatchedInferencePipeline on CUDA)
+* ``sensevoice`` - SenseVoice ONNX (sherpa-onnx)
+* ``capcut``     - CapCut Cloud / CapCut PC (sscronet.dll)
+* ``ocr``        - Hardsub OCR (RapidOCR GPU/CPU + Windows Media OCR)
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
-
-from app.config import Settings, api_key, get_settings
+from app.config import Settings, get_settings
 from app.core import hardware
 from app.core.progress import NULL_REPORTER, Cancelled, Reporter
 from app.schemas.subtitle import SubtitleSegment, TranscribeRequest, TranscribeResult
 from app.services import (
-    bcut_client,
+    asr_options,
     capcut_client,
     diarization_service,
     model_manager,
     ocr_service,
     provider_config,
     sensevoice_stt,
-    subtitle_gaps,
     subtitle_timeline,
 )
 from app.services.media_processor import (
@@ -64,16 +40,9 @@ from app.services.media_processor import (
 
 log = logging.getLogger(__name__)
 
-REMOTE_TIMEOUT = httpx.Timeout(connect=30.0, read=600.0, write=120.0, pool=30.0)
-
-# One place per provider so a proxy or a regional host only has to be typed
-# once (Settings -> API). The path is appended here, not in the config.
-REMOTE_PATHS = {"groq": "audio/transcriptions", "openai": "audio/transcriptions"}
-
 # Engines that take an audio file and answer with (start, end, text) tuples.
 CLOUD_ENGINES = {
     "capcut": capcut_client.transcribe,
-    "bilibili": bcut_client.transcribe,
 }
 
 
@@ -552,9 +521,26 @@ def _transcribe_local(
 
     duration = probe_duration(wav)
     language = None if request.language in {"", "auto"} else request.language
+    opts = asr_options.normalize_asr_options(
+        {
+            "dedup_enabled": request.dedup_enabled,
+            "dedup_similarity": request.dedup_similarity,
+            "hallucination_filter_enabled": request.hallucination_filter_enabled,
+            "hallucination_silence_threshold": request.hallucination_silence_threshold,
+        }
+    )
+
+    audio = _waveform(wav)
+    time_offset = 0.0
+    if (request.start_time is not None or request.end_time is not None) and hasattr(audio, "__len__"):
+        s_sec = max(0.0, float(request.start_time or 0.0))
+        e_sec = min(float(request.end_time), duration) if request.end_time is not None else duration
+        if e_sec > s_sec:
+            audio = audio[int(s_sec * SAMPLE_RATE) : int(e_sec * SAMPLE_RATE)]
+            time_offset = s_sec
 
     report(stage="transcribe", fraction=0.02, message="transcribing")
-    iterator, info = _transcribe_iter(model, _waveform(wav), language=language, vad=request.vad)
+    iterator, info = _transcribe_iter(model, audio, language=language, vad=request.vad)
 
     detected = getattr(info, "language", None) or language or "auto"
     probability = getattr(info, "language_probability", None)
@@ -567,16 +553,17 @@ def _transcribe_local(
         text = (raw.text or "").strip()
         if not text:
             continue
+        words = [(time_offset + l, time_offset + r, w) for l, r, w in _words_of(raw)]
         cue = subtitle_timeline.Cue(
-            start=float(raw.start),
-            end=float(raw.end),
+            start=time_offset + float(raw.start),
+            end=time_offset + float(raw.end),
             text=text,
-            words=_words_of(raw),
+            words=words,
             no_speech_prob=getattr(raw, "no_speech_prob", None),
         )
         cues.append(cue)
         report(
-            fraction=min(cue.end / total, 0.999),
+            fraction=min(float(raw.end) / total, 0.999),
             message=f"line {len(cues)}",
             segment=SubtitleSegment(
                 index=len(cues),
@@ -593,8 +580,8 @@ def _transcribe_local(
     if request.polish:
         cues = subtitle_timeline.polish(
             cues,
-            dedup_enabled=request.dedup_enabled,
-            dedup_similarity=request.dedup_similarity,
+            dedup_enabled=opts["dedup_enabled"],
+            dedup_similarity=opts["dedup_similarity"],
         )
         report(stage="transcribe", fraction=0.999, message=f"{len(cues)} lines after cleanup")
     segments = _segments_from_cues(cues)
@@ -685,80 +672,6 @@ def _transcribe_sensevoice(
 
 
 # ---------------------------------------------------------------------------
-# Remote providers
-# ---------------------------------------------------------------------------
-def _transcribe_remote(
-    wav: Path,
-    request: TranscribeRequest,
-    *,
-    report: Reporter,
-    settings: Settings,
-) -> SttOutcome:
-    provider = request.provider or settings.stt_provider
-    key = api_key(provider, settings)
-    if not key:
-        raise SttError(f"{provider.upper()}_API_KEY is not configured (see backend/.env)")
-
-    if provider == "groq":
-        model = request.model or settings.groq_stt_model
-    elif provider == "openai":
-        model = request.model or settings.openai_stt_model
-    else:
-        raise SttError(f"Unsupported STT provider: {provider}")
-    base_url = getattr(settings, f"{provider}_base_url", "") or ""
-    url = f"{base_url.rstrip('/')}/{REMOTE_PATHS[provider]}"
-
-    report(stage="upload", fraction=0.05, message=f"uploading audio to {provider}")
-    fields = [
-        ("model", model),
-        ("response_format", "verbose_json"),
-        ("timestamp_granularities[]", "segment"),
-        # Word timings cost nothing extra and let the cleaner split a long line
-        # where the speaker actually paused instead of somewhere in the middle.
-        ("timestamp_granularities[]", "word"),
-    ]
-    if request.language not in {"", "auto"}:
-        fields.append(("language", request.language))
-
-    with wav.open("rb") as handle:
-        try:
-            response = httpx.post(
-                url,
-                headers={"Authorization": f"Bearer {key}"},
-                data=fields,
-                files={"file": (wav.name, handle, "audio/wav")},
-                timeout=REMOTE_TIMEOUT,
-            )
-        except httpx.HTTPError as exc:
-            raise SttError(f"{provider} request failed: {exc}") from exc
-
-    report(stage="transcribe", fraction=0.7, message="parsing response")
-    if response.status_code >= 400:
-        raise SttError(f"{provider} error {response.status_code}: {response.text[:400]}")
-
-    payload = response.json()
-    duration = float(payload.get("duration") or probe_duration(wav))
-    cues = _cues_from_remote(payload, duration)
-    if request.polish:
-        cues = subtitle_timeline.polish(cues)
-    segments = _segments_from_cues(cues)
-    if not segments:
-        raise SttError("No speech detected in this clip")
-
-    for position, segment in enumerate(segments, start=1):
-        report(fraction=0.7 + 0.29 * position / len(segments), segment=segment)
-
-    return SttOutcome(
-        language=payload.get("language") or request.language or "auto",
-        duration=round(duration, 3),
-        segments=segments,
-        provider=provider,
-        model=model,
-        device="cloud",
-    )
-
-
-# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 def _job_key(source: Path) -> str:
@@ -812,7 +725,7 @@ def _transcribe_cloud(
     report: Reporter,
     settings: Settings,
 ) -> SttOutcome:
-    """CapCut or Bilibili: upload the audio and read the utterances back."""
+    """CapCut: upload the audio and read the utterances back."""
     engine = CLOUD_ENGINES[provider]
     try:
         duration = probe_duration(wav)
@@ -822,7 +735,7 @@ def _transcribe_cloud(
             report=report,
             settings=settings,
         )
-    except (capcut_client.CapCutError, bcut_client.BcutError) as exc:
+    except capcut_client.CapCutError as exc:
         raise SttError(str(exc)) from exc
     except MediaError as exc:
         raise SttError(str(exc)) from exc
@@ -882,142 +795,12 @@ def _transcribe_ocr(
     )
 
 
-# ---------------------------------------------------------------------------
-# The second opinion from the picture
-# ---------------------------------------------------------------------------
-def _loose(text: str) -> str:
-    """Text with no spaces, punctuation or case, for "is this the same line"."""
-    return re.sub(r"[\s\W_]+", "", (text or "").casefold())
-
-
-def _duplicate(text: str, cues: list[subtitle_timeline.Cue], start: float, window: float = 6.0) -> bool:
-    """True when a nearby cue already carries this line.
-
-    A hole stops 0.3 s short of the neighbouring cues, so a re-read normally
-    starts *inside* a line it does not own: the frame still shows the tail of
-    the previous subtitle. Appending that would draw the same words twice.
-    """
-    token = _loose(text)
-    if len(token) < 2:
-        return True
-    near = "".join(_loose(cue.text) for cue in cues if abs(cue.start - start) < window)
-    return token in near
-
-
-def _ocr_settings(request: TranscribeRequest, outcome: SttOutcome, settings: Settings) -> Settings:
-    """Pick the recogniser that matches the language drawn on the frames.
-
-    A source language the user set wins. Next comes the OCR language chosen in
-    Settings: the hardsubs are often *not* in the spoken language - a Chinese
-    drama carries Vietnamese subtitles, and the Chinese model reads those as
-    gibberish - so a language the user picked for the picture beats a guess
-    made from the audio. Only when that is left on "auto" does the language the
-    speech engine detected have a say.
-    """
-    language = (request.language or "").strip().lower()
-    if not language or language == "auto":
-        language = (settings.ocr_language or "").strip().lower()
-    if not language or language == "auto":
-        language = (outcome.language or "").strip().lower()
-    if not language or language == "auto":
-        return settings
-    return settings.model_copy(update={"ocr_language": language})
-
-
-def _fill_from_ocr(
-    source: Path,
-    wav: Path,
-    outcome: SttOutcome,
-    *,
-    request: TranscribeRequest,
-    report: Reporter,
-    settings: Settings,
-) -> tuple[SttOutcome, int]:
-    """Read the picture where the speech pass heard sound but produced no words.
-
-    The vocal stem (or the mix) is transcribed first; only the holes - loud
-    audio with no cue over it - are handed to the frame reader, which is where
-    a burned-in subtitle still exists after Whisper dropped the window. Nothing
-    here is allowed to break a transcription that already succeeded: a missing
-    engine, an unreadable wave or a failed read all leave ``outcome`` as it is.
-    """
-    audio = subtitle_gaps.load_waveform(wav)
-    if audio is None:
-        return outcome, 0
-
-    spans = subtitle_gaps.unread_windows(
-        audio, [(segment.start, segment.end) for segment in outcome.segments]
-    )
-    if not spans:
-        report(stage="ocr", fraction=1.0, message="no unread sound left - OCR not needed")
-        return outcome, 0
-
-    # Free Whisper's VRAM before launching the ONNX Runtime OCR reader (ported
-    # from 01_TachSub_Studio's run_hybrid), so both stages can use a 4 GB GPU.
-    unload()
-    report(stage="ocr", fraction=0.0, message=f"re-reading {len(spans)} unread stretch(es) with OCR")
-    try:
-        readings = ocr_service.read_windows(
-            source,
-            spans,
-            work_dir=settings.temp_path / "ocr-fill" / _job_key(source),
-            report=report,
-            settings=_ocr_settings(request, outcome, settings),
-        )
-    except Cancelled:
-        raise
-    except Exception as exc:  # noqa: BLE001 - the picture must not undo the audio result
-        log.warning("OCR gap fill failed (%s) - keeping the audio transcript", exc)
-        report(stage="ocr", fraction=1.0, message=f"OCR fill skipped: {exc}")
-        return outcome, 0
-    if not readings:
-        return outcome, 0
-
-    cues = [
-        subtitle_timeline.Cue(start=segment.start, end=segment.end, text=segment.text)
-        for segment in outcome.segments
-    ]
-    added = 0
-    for reading in readings:
-        if _duplicate(reading.text, cues, reading.start):
-            continue
-        cues.append(subtitle_timeline.Cue(start=reading.start, end=reading.end, text=reading.text))
-        added += 1
-    if not added:
-        return outcome, 0
-
-    cues.sort(key=lambda cue: (cue.start, cue.end))
-    # No polish here: the audio timeline already went through it, and the pass
-    # glues neighbouring fragments - which would weld a hardsub line in the
-    # subtitle's language onto the speech line beside it ("...的话Quên rồi sao?").
-    # A line read off the picture is whole, so it is only put in its slot.
-    segments = _segments_from_cues(cues)
-    if not segments:
-        return outcome, 0
-
-    log.info("OCR filled %s line(s) into %s unread stretch(es) of %s", added, len(spans), source.name)
-    report(stage="ocr", fraction=1.0, message=f"OCR added {added} line(s)")
-    return (
-        SttOutcome(
-            language=outcome.language,
-            duration=outcome.duration,
-            segments=segments,
-            provider=f"{outcome.provider}+ocr",
-            model=outcome.model,
-            device=outcome.device,
-        ),
-        added,
-    )
-
-
 def transcribe(
     request: TranscribeRequest,
     *,
     report: Reporter = NULL_REPORTER,
     settings: Settings | None = None,
 ) -> TranscribeResult:
-    # The Settings panel writes keys/models/mode to a JSON document; folding it
-    # in here means every provider below keeps reading plain `settings.*`.
     settings = provider_config.overlay(settings or get_settings())
     source = Path(request.video_path)
     if not source.is_file():
@@ -1026,22 +809,16 @@ def transcribe(
     provider = (request.provider or settings.stt_provider or "local").lower()
     mode = request.audio_mode or provider_config.audio_mode(settings)
 
-    # OCR never listens to the audio, so it skips the WAV extraction entirely.
-    ocr_filled = 0
     if provider == "ocr":
         outcome = _transcribe_ocr(source, request, report=report, settings=settings)
     else:
         if mode == "clean":
-            # Keep the soundtrack away from Whisper: separate the vocal first
-            # (CapCap's "Cleaner voice"), then transcribe that single stem.
             try:
                 wav = _cleaned_wav(source, settings, report)
                 report(stage="audio", fraction=1.0, message=f"vocal stem ready: {wav.name}")
             except Cancelled:
                 raise
-            except Exception as exc:  # noqa: BLE001 - missing pack, odd container
-                # Separation needs the audio-separator pack; a missing pack must
-                # degrade to the plain mix instead of failing the whole step.
+            except Exception as exc:  # noqa: BLE001
                 log.warning("vocal separation unavailable (%s) - using the full mix", exc)
                 report(stage="audio", fraction=0.0, message="không tách được giọng, dùng âm gốc")
                 mode = "fast"
@@ -1060,15 +837,7 @@ def transcribe(
         elif provider in CLOUD_ENGINES:
             outcome = _transcribe_cloud(wav, request, provider=provider, report=report, settings=settings)
         else:
-            outcome = _transcribe_remote(wav, request, report=report, settings=settings)
-
-        # Mixed extraction: the holes the speech engine left behind are the
-        # only place a burned-in line can still be recovered, so the frames are
-        # read there and nowhere else.
-        if request.ocr_fill:
-            outcome, ocr_filled = _fill_from_ocr(
-                source, wav, outcome, request=request, report=report, settings=settings
-            )
+            raise SttError(f"Unsupported STT provider: {provider}")
 
         if request.diarize:
             try:
@@ -1091,7 +860,7 @@ def transcribe(
             except Exception as exc:  # noqa: BLE001 - diarization is optional
                 log.warning("speaker diarization skipped (%s)", exc)
 
-    summary = f"{len(outcome.segments)} lines" + (f" (+{ocr_filled} from OCR)" if ocr_filled else "")
+    summary = f"{len(outcome.segments)} lines"
     report(stage="done", fraction=1.0, message=summary)
     log.info(
         "transcribed %s: %s lines via %s/%s (%s)",
@@ -1108,7 +877,6 @@ def transcribe(
         provider=outcome.provider,
         model=outcome.model,
         device=outcome.device,
-        ocr_filled=ocr_filled,
     )
 
 

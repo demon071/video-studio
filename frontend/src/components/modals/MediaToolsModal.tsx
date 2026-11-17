@@ -1,11 +1,12 @@
-import { Combine, Film, Loader2, Music, Scissors, Split, Wrench, X } from "lucide-react";
+import { Combine, Film, FolderOpen, Loader2, Music, Plus, Scissors, Split, Trash2, Wrench, X } from "lucide-react";
 import { useState } from "react";
 
-import { runMediaConcat, runMediaDemux, runMediaMux, runMediaTrim } from "@/lib/api";
-import { directoryOf, joinPath, pickSavePath, pickVideo, stem } from "@/lib/media";
+import { runMediaBatchTrim, runMediaConcat, runMediaDemux, runMediaMux } from "@/lib/api";
+import { directoryOf, joinPath, pickDirectory, pickSavePath, pickVideo, pickVideos, stem } from "@/lib/media";
 import { useEditor } from "@/store/editorStore";
 
 type ToolTab = "trim" | "concat" | "demux" | "mux";
+type TrimMode = "head_tail" | "range" | "split_duration" | "split_ranges";
 
 export function MediaToolsModal({ onClose }: { onClose: () => void }) {
   const source = useEditor((state) => state.source);
@@ -15,10 +16,22 @@ export function MediaToolsModal({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>("");
 
-  // Tab 1: Trim
-  const [trimVideo, setTrimVideo] = useState(source?.path ?? "");
+  // Tab 1: Trim (1 file, nhiều file, thư mục, bỏ đầu/cuối, chia nhiều đoạn)
+  const [trimMode, setTrimMode] = useState<TrimMode>("head_tail");
+  const [trimInputDir, setTrimInputDir] = useState("");
+  const [trimFiles, setTrimFiles] = useState<string[]>(source?.path ? [source.path] : []);
+  const [trimOutputDir, setTrimOutputDir] = useState(
+    source?.path ? joinPath(directoryOf(source.path), "trimmed") : "",
+  );
+  const [trimHead, setTrimHead] = useState(3);
+  const [trimTail, setTrimTail] = useState(3);
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(Math.min(source?.duration ?? 10, 30));
+  const [chunkDuration, setChunkDuration] = useState(15);
+  const [splitRanges, setSplitRanges] = useState<Array<[number, number]>>([
+    [0, 5],
+    [10, 15],
+  ]);
   const [trimReencode, setTrimReencode] = useState(false);
 
   // Tab 2: Concat
@@ -34,23 +47,33 @@ export function MediaToolsModal({ onClose }: { onClose: () => void }) {
   const [muxReplace, setMuxReplace] = useState(true);
 
   const handleTrim = async () => {
-    if (!trimVideo) return;
-    const out = await pickSavePath(
-      joinPath(directoryOf(trimVideo), `${stem(trimVideo)}_cut.mp4`),
-    );
-    if (!out) return;
+    if (!trimInputDir && !trimFiles.length) return;
+    let outDir = trimOutputDir.trim();
+    if (!outDir) {
+      const picked = await pickDirectory("Chọn thư mục lưu video đã cắt");
+      if (!picked) return;
+      outDir = picked;
+      setTrimOutputDir(picked);
+    }
     setBusy(true);
-    setStatus("Đang cắt video…");
+    setStatus("Đang cắt video bằng FFmpeg…");
     try {
-      const res = await runMediaTrim({
-        video_path: trimVideo,
-        output_path: out,
+      const res = await runMediaBatchTrim({
+        video_paths: trimFiles,
+        input_dir: trimInputDir.trim() || null,
+        output_dir: outDir,
+        mode: trimMode,
+        trim_head: trimHead,
+        trim_tail: trimTail,
         start: trimStart,
         end: trimEnd,
+        chunk_duration: chunkDuration,
+        ranges: splitRanges,
         reencode: trimReencode,
       });
-      setStatus(`Đã lưu: ${res.output_path}`);
-      pushLog("success", `Đã cắt video → ${res.output_path}`);
+      const skipNote = res.skipped.length ? ` · Bỏ qua ${res.skipped.length}: ${res.skipped.slice(0, 2).join(", ")}` : "";
+      setStatus(`Đã cắt xong ${res.count} file → ${outDir}${skipNote}`);
+      pushLog("success", `Cắt video hoàn tất: ${res.count} file lưu tại ${outDir}${skipNote}`);
     } catch (err) {
       setStatus(`Lỗi: ${(err as Error).message}`);
     } finally {
@@ -185,48 +208,238 @@ export function MediaToolsModal({ onClose }: { onClose: () => void }) {
 
         <div className="space-y-3 p-4 text-xs">
           {tab === "trim" && (
-            <>
+            <div className="space-y-3">
+              {/* Nguồn vào: 1 file / nhiều file / thư mục */}
+              <div className="space-y-1.5 rounded border border-border bg-surface-2 p-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-1.5">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                    Nguồn video ({trimInputDir ? `Thư mục: ${trimInputDir}` : `${trimFiles.length} file`})
+                  </span>
+                  <div className="flex gap-1">
+                    <button
+                      className="btn-ghost !px-2 !py-0.5 !text-[10px]"
+                      onClick={async () => {
+                        const paths = await pickVideos();
+                        if (paths.length) {
+                          setTrimInputDir("");
+                          setTrimFiles(paths);
+                          if (!trimOutputDir) setTrimOutputDir(joinPath(directoryOf(paths[0]), "trimmed"));
+                        }
+                      }}
+                    >
+                      Chọn 1 / nhiều file…
+                    </button>
+                    <button
+                      className="btn-ghost !px-2 !py-0.5 !text-[10px]"
+                      onClick={async () => {
+                        const dir = await pickDirectory("Chọn thư mục chứa video cần cắt");
+                        if (dir) {
+                          setTrimInputDir(dir);
+                          setTrimFiles([]);
+                          setTrimOutputDir(joinPath(dir, "trimmed"));
+                        }
+                      }}
+                    >
+                      <FolderOpen size={10} />
+                      Chọn thư mục…
+                    </button>
+                  </div>
+                </div>
+                {trimInputDir ? (
+                  <div className="flex items-center justify-between gap-2 rounded bg-surface-1 px-2 py-1 font-mono text-[10px] text-emerald-300">
+                    <span className="truncate">{trimInputDir}</span>
+                    <button className="text-slate-400 hover:text-rose-300" onClick={() => setTrimInputDir("")}>
+                      ×
+                    </button>
+                  </div>
+                ) : trimFiles.length > 0 ? (
+                  <div className="max-h-20 space-y-0.5 overflow-y-auto rounded bg-surface-1 p-1.5 font-mono text-[10px] text-slate-300">
+                    {trimFiles.map((f, idx) => (
+                      <div key={f} className="flex items-center justify-between gap-2">
+                        <span className="truncate">{idx + 1}. {f}</span>
+                        <button
+                          className="text-slate-500 hover:text-rose-400"
+                          onClick={() => setTrimFiles((prev) => prev.filter((_, i) => i !== idx))}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-slate-500">Chưa chọn video hoặc thư mục nào.</p>
+                )}
+              </div>
+
+              {/* 4 chế độ cắt */}
+              <div className="grid grid-cols-4 gap-1 text-[10px]">
+                {(
+                  [
+                    { id: "head_tail", label: "Bỏ đầu / cuối" },
+                    { id: "range", label: "Khoảng [Đầu–Cuối]" },
+                    { id: "split_duration", label: "Chia đều đoạn" },
+                    { id: "split_ranges", label: "Nhiều đoạn" },
+                  ] as const
+                ).map((m) => (
+                  <button
+                    key={m.id}
+                    onClick={() => setTrimMode(m.id)}
+                    className={`rounded border px-1.5 py-1 font-medium transition-colors ${
+                      trimMode === m.id
+                        ? "border-brand bg-brand/15 text-brand"
+                        : "border-border bg-surface-2 text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+
+              {trimMode === "head_tail" && (
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="space-y-1">
+                    <span className="text-[10px] text-slate-400">Bỏ đoạn đầu (giây)</span>
+                    <input
+                      type="number"
+                      step={0.5}
+                      min={0}
+                      className="field w-full font-mono"
+                      value={trimHead}
+                      onChange={(e) => setTrimHead(Math.max(0, Number(e.target.value)))}
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-[10px] text-slate-400">Bỏ đoạn cuối (giây)</span>
+                    <input
+                      type="number"
+                      step={0.5}
+                      min={0}
+                      className="field w-full font-mono"
+                      value={trimTail}
+                      onChange={(e) => setTrimTail(Math.max(0, Number(e.target.value)))}
+                    />
+                  </label>
+                </div>
+              )}
+
+              {trimMode === "range" && (
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="space-y-1">
+                    <span className="text-[10px] text-slate-400">Bắt đầu (giây)</span>
+                    <input
+                      type="number"
+                      step={0.1}
+                      min={0}
+                      className="field w-full font-mono"
+                      value={trimStart}
+                      onChange={(e) => setTrimStart(Math.max(0, Number(e.target.value)))}
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-[10px] text-slate-400">Kết thúc (giây)</span>
+                    <input
+                      type="number"
+                      step={0.1}
+                      min={0.1}
+                      className="field w-full font-mono"
+                      value={trimEnd}
+                      onChange={(e) => setTrimEnd(Math.max(0.1, Number(e.target.value)))}
+                    />
+                  </label>
+                </div>
+              )}
+
+              {trimMode === "split_duration" && (
+                <label className="block space-y-1">
+                  <span className="text-[10px] text-slate-400">Thời lượng mỗi đoạn (giây)</span>
+                  <input
+                    type="number"
+                    step={1}
+                    min={1}
+                    className="field w-full font-mono"
+                    value={chunkDuration}
+                    onChange={(e) => setChunkDuration(Math.max(1, Number(e.target.value)))}
+                  />
+                </label>
+              )}
+
+              {trimMode === "split_ranges" && (
+                <div className="space-y-1.5 rounded border border-border bg-surface-2 p-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-slate-400">Danh sách các đoạn cần cắt</span>
+                    <button
+                      className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
+                      onClick={() => {
+                        const lastEnd = splitRanges[splitRanges.length - 1]?.[1] ?? 0;
+                        setSplitRanges((prev) => [...prev, [lastEnd, lastEnd + 5]]);
+                      }}
+                    >
+                      <Plus size={10} /> Thêm đoạn
+                    </button>
+                  </div>
+                  <div className="max-h-28 space-y-1 overflow-y-auto">
+                    {splitRanges.map(([rs, re], i) => (
+                      <div key={i} className="flex items-center gap-1.5">
+                        <span className="w-10 font-mono text-[10px] text-slate-500">#{i + 1}</span>
+                        <input
+                          type="number"
+                          step={0.1}
+                          min={0}
+                          className="field !w-20 !py-0.5 font-mono !text-[11px]"
+                          value={rs}
+                          onChange={(e) =>
+                            setSplitRanges((prev) =>
+                              prev.map((r, idx) => (idx === i ? [Number(e.target.value), r[1]] : r)),
+                            )
+                          }
+                        />
+                        <span className="text-slate-500">→</span>
+                        <input
+                          type="number"
+                          step={0.1}
+                          min={0.1}
+                          className="field !w-20 !py-0.5 font-mono !text-[11px]"
+                          value={re}
+                          onChange={(e) =>
+                            setSplitRanges((prev) =>
+                              prev.map((r, idx) => (idx === i ? [r[0], Number(e.target.value)] : r)),
+                            )
+                          }
+                        />
+                        <span className="text-[10px] text-slate-500">s</span>
+                        {splitRanges.length > 1 && (
+                          <button
+                            className="ml-auto text-slate-500 hover:text-rose-400"
+                            onClick={() => setSplitRanges((prev) => prev.filter((_, idx) => idx !== i))}
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Thư mục xuất */}
               <div className="flex gap-2">
                 <input
                   className="field flex-1 font-mono !text-[11px]"
-                  value={trimVideo}
-                  placeholder="Đường dẫn video…"
-                  onChange={(e) => setTrimVideo(e.target.value)}
+                  value={trimOutputDir}
+                  placeholder="Thư mục lưu file sau khi cắt…"
+                  onChange={(e) => setTrimOutputDir(e.target.value)}
                 />
                 <button
                   className="btn-ghost"
                   onClick={async () => {
-                    const p = await pickVideo();
-                    if (p) setTrimVideo(p);
+                    const dir = await pickDirectory("Chọn thư mục lưu kết quả");
+                    if (dir) setTrimOutputDir(dir);
                   }}
                 >
-                  Chọn…
+                  Lưu vào…
                 </button>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <label className="space-y-1">
-                  <span className="text-[10px] text-slate-400">Bắt đầu (giây)</span>
-                  <input
-                    type="number"
-                    step={0.1}
-                    min={0}
-                    className="field w-full font-mono"
-                    value={trimStart}
-                    onChange={(e) => setTrimStart(Number(e.target.value))}
-                  />
-                </label>
-                <label className="space-y-1">
-                  <span className="text-[10px] text-slate-400">Kết thúc (giây)</span>
-                  <input
-                    type="number"
-                    step={0.1}
-                    min={0.1}
-                    className="field w-full font-mono"
-                    value={trimEnd}
-                    onChange={(e) => setTrimEnd(Number(e.target.value))}
-                  />
-                </label>
-              </div>
+
               <label className="flex items-center gap-2 text-[11px] text-slate-400">
                 <input
                   type="checkbox"
@@ -235,11 +448,16 @@ export function MediaToolsModal({ onClose }: { onClose: () => void }) {
                 />
                 Mã hoá lại chính xác từng khung hình (tắt = copy siêu tốc)
               </label>
-              <button className="btn-primary w-full" onClick={() => void handleTrim()} disabled={busy || !trimVideo}>
+
+              <button
+                className="btn-primary w-full"
+                onClick={() => void handleTrim()}
+                disabled={busy || (!trimInputDir && trimFiles.length === 0)}
+              >
                 {busy ? <Loader2 size={12} className="animate-spin" /> : <Scissors size={12} />}
-                Cắt & Lưu Video
+                Thực hiện cắt Video
               </button>
-            </>
+            </div>
           )}
 
           {tab === "concat" && (
@@ -249,11 +467,11 @@ export function MediaToolsModal({ onClose }: { onClose: () => void }) {
                 <button
                   className="btn-ghost !py-1 !text-[11px]"
                   onClick={async () => {
-                    const p = await pickVideo();
-                    if (p) setConcatList((prev) => [...prev, p]);
+                    const paths = await pickVideos();
+                    if (paths.length) setConcatList((prev) => [...prev, ...paths]);
                   }}
                 >
-                  + Thêm video
+                  + Thêm nhiều video
                 </button>
               </div>
               <div className="max-h-40 space-y-1 overflow-y-auto rounded border border-border bg-surface-2 p-2">

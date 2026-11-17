@@ -27,19 +27,19 @@ from app.services import (
     capcut_client,
     elevenlabs_tts,
     media_processor,
-    model_manager,
     omnivoice_tts,
+    piper_tts,
     provider_config,
     translate_service,
-    voicestudio_tts,
+    vieneu_tts,
 )
 from app.services.media_processor import MediaError, SyncReport
 
 log = logging.getLogger(__name__)
 
 # CapCut needs no account and sounds right in Vietnamese on the first try, so it
-# stays what an empty provider box runs. OmniVoice and VoiceStudio are local
-# alternatives: one in-process on torch, one a call to a local server.
+# stays what an empty provider box runs. OmniVoice is the offline torch engine
+# and ElevenLabs is the cloud studio alternative (all ported from CapCap).
 DEFAULT_PROVIDER = "capcut"
 
 
@@ -65,13 +65,6 @@ def _synth_omnivoice(text: str, target: Path, *, voice: str, settings: Settings)
     try:
         return omnivoice_tts.synthesize(text, target, voice=voice, settings=settings)
     except omnivoice_tts.OmnivoiceError as exc:
-        raise TtsError(str(exc)) from exc
-
-
-def _synth_voicestudio(text: str, target: Path, *, voice: str, settings: Settings) -> Path:
-    try:
-        return voicestudio_tts.synthesize(text, target, voice=voice, settings=settings)
-    except voicestudio_tts.VoiceStudioError as exc:
         raise TtsError(str(exc)) from exc
 
 
@@ -109,6 +102,20 @@ def _synth_elevenlabs(text: str, target: Path, *, voice: str, settings: Settings
         raise TtsError(str(exc)) from exc
 
 
+def _synth_piper(text: str, target: Path, *, voice: str, rate: str | None, settings: Settings) -> Path:
+    try:
+        return piper_tts.synthesize(text, target, voice=voice, speed=_rate_factor(rate), settings=settings)
+    except piper_tts.PiperError as exc:
+        raise TtsError(str(exc)) from exc
+
+
+def _synth_vieneu(text: str, target: Path, *, voice: str, settings: Settings) -> Path:
+    try:
+        return vieneu_tts.synthesize(text, target, voice=voice, settings=settings)
+    except vieneu_tts.VieNeuError as exc:
+        raise TtsError(str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Public primitives
 # ---------------------------------------------------------------------------
@@ -116,10 +123,12 @@ def resolve_voice(provider: str, voice: str | None, settings: Settings) -> str:
     chosen = (provider or DEFAULT_PROVIDER).lower()
     if chosen == "omnivoice":
         return omnivoice_tts.resolve_voice(voice, settings)
-    if chosen == "voicestudio":
-        return voicestudio_tts.resolve_voice(voice, settings)
     if chosen == "elevenlabs":
         return elevenlabs_tts.resolve_voice(voice, settings)
+    if chosen == "piper":
+        return piper_tts.resolve_voice(voice, settings)
+    if chosen == "vieneu":
+        return vieneu_tts.resolve_voice(voice, settings)
     if chosen == "capcut":
         return (voice or settings.capcut_voice or capcut_client.DEFAULT_TTS_VOICE).strip()
     if voice:
@@ -149,8 +158,10 @@ def synthesize(
         return _synth_elevenlabs(text, target.with_suffix(".mp3"), voice=speaker, settings=settings)
     if chosen == "omnivoice":
         return _synth_omnivoice(text, target.with_suffix(".wav"), voice=speaker, settings=settings)
-    if chosen == "voicestudio":
-        return _synth_voicestudio(text, target.with_suffix(".wav"), voice=speaker, settings=settings)
+    if chosen == "piper":
+        return _synth_piper(text, target.with_suffix(".wav"), voice=speaker, rate=rate, settings=settings)
+    if chosen == "vieneu":
+        return _synth_vieneu(text, target.with_suffix(".wav"), voice=speaker, settings=settings)
     raise TtsError(f"Unsupported TTS provider: {chosen}")
 
 
@@ -192,18 +203,15 @@ def _char_budget(seconds: float, *, rate: float = CHARS_PER_SECOND) -> int:
 
 
 def _prepare_rewrite(timing_rewrite: bool, settings: Settings) -> bool:
-    """Can this run reword a line? A local rewrite needs the LLM, and the LLM
-    needs the VRAM whisper was holding. Cloud providers need neither."""
+    """Only LLM-backed providers can shorten a line to fit its time slot."""
     if not timing_rewrite:
         return False
-    if (settings.translate_provider or "local").lower() != "local":
-        return True
-    if model_manager.llm_path(settings) is None:
-        return False
-    from app.services import stt_service  # noqa: PLC0415 - avoid the import cycle at module load
-
-    stt_service.unload()
-    return True
+    return (settings.translate_provider or "google").lower() in {
+        "gemini",
+        "openai",
+        "deepseek",
+        "ollama",
+    }
 
 
 def _render_line(
@@ -216,6 +224,7 @@ def _render_line(
     folder: Path,
     slot_end: float,
     timing_rewrite: bool,
+    trim_silence: bool = True,
     language: str,
     settings: Settings,
     report: Reporter = NULL_REPORTER,
@@ -233,6 +242,7 @@ def _render_line(
                 index=segment.index,
                 start=segment.start,
                 end=slot_end,
+                trim_silence=trim_silence,
             )
         except (TtsError, MediaError) as exc:
             raise TtsError(f"line {segment.index}: {exc}") from exc
@@ -305,6 +315,7 @@ def dub(
     rate: str | None = None,
     use_translation: bool = True,
     timing_rewrite: bool = True,
+    trim_silence: bool = True,
     language: str | None = None,
     video_path: str | Path | None = None,
     report: Reporter = NULL_REPORTER,
@@ -361,6 +372,7 @@ def dub(
             folder=folder,
             slot_end=slots[segment.index],
             timing_rewrite=timing_rewrite,
+            trim_silence=trim_silence,
             language=spoken_language,
             report=report,
             settings=settings,

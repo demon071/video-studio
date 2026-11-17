@@ -235,8 +235,9 @@ def delete_project(path: str | Path) -> bool:
 
 
 def list_projects(settings: Settings | None = None) -> ProjectListResult:
-    """Known projects, newest first (the autosave snapshot is not listed)."""
-    folder = projects_dir(settings or get_settings())
+    """Known saved projects and unsaved cached snapshots, newest first."""
+    resolved = settings or get_settings()
+    folder = projects_dir(resolved)
     rows: list[ProjectSummary] = []
     for file in folder.glob(f"*{PROJECT_SUFFIX}"):
         try:
@@ -259,21 +260,77 @@ def list_projects(settings: Settings | None = None) -> ProjectListResult:
                 modified=stat.st_mtime,
                 size_bytes=stat.st_size,
                 damaged=damaged,
+                cached=False,
             )
         )
     rows.sort(key=lambda row: row.modified, reverse=True)
-    return ProjectListResult(projects=rows, folder=str(folder))
+
+    cached_rows: list[ProjectSummary] = []
+    cdir = folder / "_cache"
+    cache_candidates: list[Path] = []
+    if cdir.is_dir():
+        cache_candidates.extend(cdir.glob("*.svacache.json"))
+    sess = session_path(resolved)
+    if sess.is_file() and not cache_candidates:
+        cache_candidates.append(sess)
+
+    for file in cache_candidates:
+        try:
+            stat = file.stat()
+            stored = _read_json(file)
+        except (OSError, ProjectError):
+            continue
+        title = stored.name or (Path(stored.source.path).stem if stored.source and stored.source.path else "Bản nháp chưa lưu")
+        if stored.segments:
+            title = f"{title} ({len(stored.segments)} dòng)"
+        cached_rows.append(
+            ProjectSummary(
+                path=str(file),
+                name=title,
+                saved_at=stored.saved_at,
+                modified=stat.st_mtime,
+                size_bytes=stat.st_size,
+                damaged=False,
+                cached=True,
+            )
+        )
+    cached_rows.sort(key=lambda row: row.modified, reverse=True)
+    return ProjectListResult(projects=rows, cached_projects=cached_rows, folder=str(folder))
 
 
 # ---------------------------------------------------------------------------
 # Session autosave
 # ---------------------------------------------------------------------------
+def _write_rolling_cache(project: ProjectFile, settings: Settings) -> None:
+    """Keep one cached snapshot per source video/name so unsaved work stays recoverable."""
+    if not (project.source or project.segments or project.dub):
+        return
+    import hashlib  # noqa: PLC0415
+
+    key_src = (project.source.path if project.source and project.source.path else project.name) or "draft"
+    digest = hashlib.sha1(key_src.encode("utf-8")).hexdigest()[:8]
+    stem = _slug(Path(key_src).stem if project.source and project.source.path else (project.name or "draft"))
+    cdir = projects_dir(settings) / "_cache"
+    cdir.mkdir(parents=True, exist_ok=True)
+    target = cdir / f"{stem}_{digest}.svacache.json"
+    _write_json(target, project.model_dump(mode="json"))
+
+    # Keep at most 20 recent cached projects.
+    try:
+        cached = sorted(cdir.glob("*.svacache.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in cached[20:]:
+            stale.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def write_session(project: ProjectFile, settings: Settings | None = None) -> ProjectEnvelope:
     """Snapshot the editor so a restart can resume it."""
     settings = settings or get_settings()
     project = project.model_copy(deep=True)
     _persist_dub(project, settings)
     _write_json(session_path(settings), project.model_dump(mode="json"))
+    _write_rolling_cache(project, settings)
     return ProjectEnvelope(path=None, project=project, missing=_missing_assets(project))
 
 

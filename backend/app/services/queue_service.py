@@ -21,7 +21,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from app.config import get_settings
-from app.schemas.subtitle import SubtitleStyle
+from app.schemas.subtitle import DubbingResult, SubtitleSegment, SubtitleStyle, TranscribeRequest
 from app.services import media_processor, stt_service, translate_service, tts_service
 from app.utils.subtitles import write_subtitles
 
@@ -43,12 +43,14 @@ class QueueItem:
     output_path: str | None = None
     work_dir: str | None = None
     source_mode: str = "audio"
-    target_language: str = "Vietnamese"
+    stt_provider: str = "local"
+    target_language: str = "vi"
     translate_provider: str = "google"
     translate_preset: str = "general"
     tts_provider: str = "capcut"
     tts_voice: str | None = None
     aspect: str = "9:16"
+    segments_count: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -109,13 +111,15 @@ class ProcessingQueueManager:
         video_paths: list[str],
         *,
         source_mode: str = "audio",
-        target_language: str = "Vietnamese",
+        stt_provider: str | None = None,
+        target_language: str = "vi",
         translate_provider: str = "google",
         translate_preset: str = "general",
         tts_provider: str = "capcut",
         tts_voice: str | None = None,
         aspect: str = "9:16",
     ) -> dict[str, Any]:
+        resolved_stt = stt_provider or ("ocr" if source_mode == "ocr" else "local")
         with self._lock:
             self._ensure_loaded()
             for vp in video_paths:
@@ -125,6 +129,7 @@ class ProcessingQueueManager:
                     video_path=str(p),
                     title=p.name,
                     source_mode=source_mode,
+                    stt_provider=resolved_stt,
                     target_language=target_language,
                     translate_provider=translate_provider,
                     translate_preset=translate_preset,
@@ -135,6 +140,27 @@ class ProcessingQueueManager:
                 self._items.append(item)
             self._save()
             return self.snapshot()
+
+    def get_preview(self, item_id: str) -> dict[str, Any]:
+        """Return saved segments & dub result for a processed queue item so the UI can review it."""
+        with self._lock:
+            self._ensure_loaded()
+            item = next((it for it in self._items if it.id == item_id), None)
+        if item is None:
+            raise KeyError(f"Queue item {item_id} not found")
+        if not item.work_dir:
+            raise ValueError("Video này chưa được xử lý.")
+        work = Path(item.work_dir)
+        seg_file = work / "segments.json"
+        dub_file = work / "dub.json"
+        segments = json.loads(seg_file.read_text(encoding="utf-8")) if seg_file.is_file() else []
+        dub = json.loads(dub_file.read_text(encoding="utf-8")) if dub_file.is_file() else None
+        return {
+            "item": asdict(item),
+            "video_path": item.video_path,
+            "segments": segments,
+            "dub": dub,
+        }
 
     def remove_item(self, item_id: str) -> dict[str, Any]:
         with self._lock:
@@ -235,32 +261,48 @@ class ProcessingQueueManager:
         try:
             ass_path = work_folder / "subtitles.ass"
             dub_track_path = work_folder / "dub_track.wav"
+            segments_file = work_folder / "segments.json"
+            dub_file = work_folder / "dub.json"
 
             if mode in ("process_only", "process_and_export"):
-                self._update_item(item, progress=0.1, stage="Tách phụ đề...")
+                resolved_stt = item.stt_provider or ("ocr" if item.source_mode == "ocr" else "local")
+                self._update_item(item, progress=0.1, stage=f"Tách phụ đề ({resolved_stt})...")
                 tx = stt_service.transcribe(
-                    source,
-                    work_dir=work_folder,
-                    source_mode=item.source_mode,  # type: ignore[arg-type]
+                    TranscribeRequest(video_path=str(source), provider=resolved_stt),  # type: ignore[arg-type]
+                    settings=settings,
                 )
                 if self._stop_now:
                     self._update_item(item, status="stopped", stage="Đã dừng")
                     return
 
-                self._update_item(item, progress=0.4, stage="Dịch phụ đề...")
-                tr = translate_service.translate_segments(
+                self._update_item(item, progress=0.4, stage=f"Dịch phụ đề ({item.translate_provider})...")
+                tr = translate_service.translate(
                     tx.segments,
-                    target_language=item.target_language,
-                    provider=item.translate_provider,  # type: ignore[arg-type]
-                    preset=item.translate_preset,
+                    target_language=item.target_language or "vi",
+                    provider=item.translate_provider,
+                    preset=item.translate_preset or None,
+                    settings=settings,
                 )
                 if self._stop_now:
                     self._update_item(item, status="stopped", stage="Đã dừng")
                     return
 
-                write_subtitles(tr.segments, ass_path, fmt="ass", style=SubtitleStyle(), aspect=item.aspect, use_translation=True)
+                segments_file.write_text(
+                    json.dumps([s.model_dump(mode="json") for s in tr.segments], ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                ass_w, ass_h = media_processor.TARGET_ASPECTS.get(item.aspect, (1080, 1920))
+                write_subtitles(
+                    tr.segments,
+                    ass_path,
+                    fmt="ass",
+                    width=ass_w,
+                    height=ass_h,
+                    style=SubtitleStyle(),
+                    use_translation=True,
+                )
 
-                self._update_item(item, progress=0.65, stage="Lồng tiếng TTS...")
+                self._update_item(item, progress=0.65, stage=f"Lồng tiếng ({item.tts_provider})...", segments_count=len(tr.segments))
                 dub_res = tts_service.dub(
                     tr.segments,
                     work_dir=work_folder,
@@ -268,11 +310,27 @@ class ProcessingQueueManager:
                     voice=item.tts_voice,
                     use_translation=True,
                     video_path=str(source),
+                    settings=settings,
                 )
                 dub_track_path = dub_res.track_path
+                dub_payload = DubbingResult(
+                    track_path=str(dub_res.track_path),
+                    duration=dub_res.duration,
+                    provider=dub_res.provider,
+                    voice=dub_res.voice,
+                    segments=dub_res.reports,
+                    skipped=dub_res.skipped,
+                    rewritten=dub_res.rewritten,
+                ).model_dump(mode="json")
+                dub_file.write_text(json.dumps(dub_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
                 if mode == "process_only":
-                    self._update_item(item, status="ready_to_export", progress=1.0, stage="Sẵn sàng xuất video")
+                    self._update_item(
+                        item,
+                        status="ready_to_export",
+                        progress=1.0,
+                        stage=f"Đã xử lý ({len(tr.segments)} dòng) · Chờ xem & xuất",
+                    )
                     return
 
             if mode in ("process_and_export", "export_selected"):

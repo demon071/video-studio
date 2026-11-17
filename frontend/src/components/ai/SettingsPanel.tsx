@@ -44,7 +44,6 @@ import {
 } from "@/lib/region";
 import { useEditor } from "@/store/editorStore";
 import type {
-  LlmModelInfo,
   ProviderConfig,
   ProviderPatchBody,
   ProviderTestResult,
@@ -132,14 +131,6 @@ export function SettingsPanel() {
     }
   };
 
-  /** Switching GGUF is one stored filename: the next job loads the new weights. */
-  const chooseLlm = (option: LlmModelInfo) => {
-    if (option.active) return;
-    void persist({ llm: { model: option.filename } }, `Dịch offline: ${option.label}`).catch(
-      (error: Error) => pushLog("error", `Lưu model offline thất bại: ${error.message}`),
-    );
-  };
-
   if (!settings) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-[11px] text-slate-500">
@@ -179,81 +170,8 @@ export function SettingsPanel() {
         ))}
       </Section>
 
-      {/* 2 — offline translator: which GGUF the local provider loads -------- */}
-      <Section icon={<Cpu size={12} />} title="2 · Dịch offline (GGUF)">
-        <p className="text-[10px] leading-relaxed text-slate-500">
-          Model chạy trên máy cho provider <span className="font-mono">Offline</span> ở tab AI. Đổi model
-          là lượt dịch kế tiếp nạp bộ trọng số mới — không cần API key, không dùng Internet.
-        </p>
-
-        <div className="space-y-1.5">
-          {settings.llm.options.map((option) => {
-            const active = option.active;
-            const busy = busyModel === option.key;
-            return (
-              <article
-                key={option.key}
-                className={`rounded-md border px-2.5 py-2 transition-colors ${
-                  active ? "border-brand/60 bg-brand/10" : "border-border bg-surface-1 hover:border-slate-500"
-                }`}
-              >
-                <button className="w-full text-left" onClick={() => chooseLlm(option)} title="Dùng model này">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-1 text-[11px] font-medium text-slate-200">
-                      {active ? (
-                        <CheckCircle2 size={10} className="shrink-0 text-brand" />
-                      ) : (
-                        <span className="h-2.5 w-2.5 shrink-0 rounded-full border border-slate-600" />
-                      )}
-                      {option.label}
-                    </span>
-                    <span className="shrink-0 font-mono text-[10px] text-slate-400">{option.size_mb} MB</span>
-                  </div>
-                  <p className="mt-1 pl-3.5 text-[10px] leading-relaxed text-slate-500">
-                    {option.description}
-                  </p>
-                </button>
-
-                <div className="mt-1.5 flex items-center justify-between pl-3.5">
-                  <span
-                    className={`text-[9px] uppercase tracking-wide ${
-                      option.installed ? "text-emerald-400" : "text-amber-300"
-                    }`}
-                  >
-                    {option.installed ? "đã tải" : "chưa tải"}
-                  </span>
-                  {!option.installed && (
-                    <button
-                      className="btn-ghost !px-2 !py-0.5 !text-[10px]"
-                      onClick={() => void install(option.key, option.label)}
-                      disabled={busy || Boolean(downloading)}
-                    >
-                      {busy ? <Loader2 size={10} className="animate-spin" /> : <Download size={10} />}
-                      Tải về
-                    </button>
-                  )}
-                </div>
-              </article>
-            );
-          })}
-        </div>
-
-        {!settings.llm.ready && (
-          <Hint tone="warn" icon={<TriangleAlert size={11} />}>
-            Model đang chọn chưa có trên đĩa — lượt dịch đầu tiên sẽ báo lỗi ngay. Tải trọng số ở trên
-            hoặc chọn model đã cài.
-          </Hint>
-        )}
-
-        <Hint tone="info">
-          Mỗi GGUF nạp bằng đúng chat template của nó: Qwen2.5 dùng chatml, Gemma 3 dùng
-          <span className="font-mono"> &lt;start_of_turn&gt;</span> và bộ quy tắc dịch được đưa vào lượt
-          người dùng vì Gemma không có role system. Cả hai vẫn ép JSON bằng grammar nên không lệch id.
-        </Hint>
-      </Section>
-
-      {/* 3 — OCR speed / accuracy ------------------------------------------- */}
-      <Section icon={<ScanText size={12} />} title="3 · OCR — đọc phụ đề cứng">
+      {/* 2 — OCR speed / accuracy ------------------------------------------- */}
+      <Section icon={<ScanText size={12} />} title="2 · OCR — đọc phụ đề cứng">
         <Labelled label="Engine">
           <select
             className="field"
@@ -269,9 +187,9 @@ export function SettingsPanel() {
               <option key={engine} value={engine}>
                 {engine === "rapidocr"
                   ? "RapidOCR (ONNX, khuyên dùng)"
-                  : engine === "paddleocr"
-                    ? "PaddleOCR"
-                    : "EasyOCR"}
+                  : engine === "winocr"
+                    ? "Windows Media OCR (hệ thống)"
+                    : engine}
               </option>
             ))}
           </select>

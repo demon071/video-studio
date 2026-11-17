@@ -6,8 +6,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from app.api.routes._common import run_job, with_suffix
+from app.api.routes._common import run_job, with_suffix, work_dir
 from app.schemas.media import (
+    MediaBatchTrimRequest,
     MediaConcatRequest,
     MediaDemuxRequest,
     MediaMuxRequest,
@@ -16,6 +17,7 @@ from app.schemas.media import (
     ProbeResult,
     ThumbnailRequest,
     ThumbnailResult,
+    TimelineCutRequest,
 )
 from app.services import media_processor
 
@@ -71,6 +73,65 @@ def thumbnail(request: ThumbnailRequest) -> ThumbnailResult:
     return ThumbnailResult(**run_job("thumbnail", work))
 
 
+@router.post("/api/media/cut")
+def cut_timeline_video(request: TimelineCutRequest) -> dict:
+    """Trim left, trim right, or delete a selected range from the timeline video."""
+    source = Path(request.video_path)
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail=f"Video not found: {source}")
+
+    folder = work_dir("cuts")
+    out_path = folder / f"{source.stem}_{request.mode}.mp4"
+
+    def work(report) -> dict:
+        report(stage="media_tools", fraction=0.1, message="Đang cắt video...")
+        try:
+            duration = media_processor.probe_duration(source)
+            if duration <= 0.2:
+                raise media_processor.MediaError("Video quá ngắn để cắt.")
+
+            if request.mode == "trim_left":
+                cut_at = min(max(request.start, 0.05), duration - 0.1)
+                produced = media_processor.trim_media(
+                    source, out_path, start=cut_at, end=duration, reencode=True
+                )
+            elif request.mode == "trim_right":
+                cut_at = min(max(request.end or request.start, 0.1), duration - 0.05)
+                produced = media_processor.trim_media(
+                    source, out_path, start=0.0, end=cut_at, reencode=True
+                )
+            else:
+                a = max(0.0, request.start)
+                b = min(duration, request.end)
+                if b <= a + 0.05:
+                    raise media_processor.MediaError("Khoảng chọn cần xóa quá ngắn.")
+                if a <= 0.05 and b >= duration - 0.05:
+                    raise media_processor.MediaError("Không thể xóa toàn bộ video.")
+                if a <= 0.05:
+                    produced = media_processor.trim_media(
+                        source, out_path, start=b, end=duration, reencode=True
+                    )
+                elif b >= duration - 0.05:
+                    produced = media_processor.trim_media(
+                        source, out_path, start=0.0, end=a, reencode=True
+                    )
+                else:
+                    part1 = folder / f"{source.stem}_part1.mp4"
+                    part2 = folder / f"{source.stem}_part2.mp4"
+                    media_processor.trim_media(source, part1, start=0.0, end=a, reencode=True)
+                    report(fraction=0.5, message="Đang ghép lại phần còn lại...")
+                    media_processor.trim_media(source, part2, start=b, end=duration, reencode=True)
+                    produced = media_processor.concat_media([part1, part2], out_path, reencode=False)
+
+            new_duration = media_processor.probe_duration(produced)
+        except media_processor.MediaError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        report(fraction=1.0, message="Đã cắt xong video")
+        return {"output_path": str(produced), "duration": round(new_duration, 3)}
+
+    return run_job("media_tools", work)
+
+
 @router.post("/api/media/tools/trim")
 def trim_tool(request: MediaTrimRequest) -> dict:
     """Cut a segment [start, end] from a video file."""
@@ -88,6 +149,112 @@ def trim_tool(request: MediaTrimRequest) -> dict:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         report(fraction=1.0, message="Đã cắt xong video")
         return {"output_path": str(produced)}
+
+    return run_job("media_tools", work)
+
+
+_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+
+
+@router.post("/api/media/tools/batch-trim")
+def batch_trim_tool(request: MediaBatchTrimRequest) -> dict:
+    """Trim multiple files from a folder/list, split a file into segments, or trim head/tail."""
+    files: list[Path] = []
+    if request.input_dir:
+        folder = Path(request.input_dir)
+        if not folder.is_dir():
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy thư mục: {folder}")
+        files.extend(
+            sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _VIDEO_EXTS)
+        )
+    for vp in request.video_paths:
+        p = Path(vp)
+        if p.is_file() and p not in files:
+            files.append(p)
+
+    if not files:
+        raise HTTPException(status_code=400, detail="Không tìm thấy file video nào để cắt.")
+
+    out_dir = Path(request.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def work(report) -> dict:
+        outputs: list[str] = []
+        skipped: list[str] = []
+        total = len(files)
+
+        for idx, src in enumerate(files, start=1):
+            report(
+                stage="media_tools",
+                fraction=(idx - 1) / total,
+                message=f"Đang cắt ({idx}/{total}): {src.name}",
+            )
+            try:
+                dur = media_processor.probe_duration(src)
+                if dur <= 0.1:
+                    skipped.append(f"{src.name} (quá ngắn)")
+                    continue
+
+                if request.mode == "head_tail":
+                    s = max(0.0, request.trim_head)
+                    e = max(0.0, dur - request.trim_tail)
+                    if e <= s + 0.1:
+                        skipped.append(f"{src.name} (thời lượng còn lại <= 0.1s)")
+                        continue
+                    out = out_dir / f"{src.stem}_trimmed.mp4"
+                    produced = media_processor.trim_media(
+                        src, out, start=s, end=e, reencode=request.reencode
+                    )
+                    outputs.append(str(produced))
+
+                elif request.mode == "range":
+                    s = max(0.0, request.start)
+                    e = min(dur, request.end) if request.end > 0 else dur
+                    if e <= s + 0.1:
+                        skipped.append(f"{src.name} (khoảng cắt không hợp lệ)")
+                        continue
+                    out = out_dir / f"{src.stem}_cut.mp4"
+                    produced = media_processor.trim_media(
+                        src, out, start=s, end=e, reencode=request.reencode
+                    )
+                    outputs.append(str(produced))
+
+                elif request.mode == "split_duration":
+                    step = max(0.5, request.chunk_duration)
+                    part = 1
+                    cur = 0.0
+                    while cur < dur - 0.1:
+                        nxt = min(dur, cur + step)
+                        if nxt - cur < 0.1:
+                            break
+                        out = out_dir / f"{src.stem}_part{part:03d}.mp4"
+                        produced = media_processor.trim_media(
+                            src, out, start=cur, end=nxt, reencode=request.reencode
+                        )
+                        outputs.append(str(produced))
+                        part += 1
+                        cur = nxt
+
+                elif request.mode == "split_ranges":
+                    if not request.ranges:
+                        skipped.append(f"{src.name} (chưa có danh sách đoạn)")
+                        continue
+                    for seg_idx, (rs, re_) in enumerate(request.ranges, start=1):
+                        s = max(0.0, float(rs))
+                        e = min(dur, float(re_))
+                        if e <= s + 0.1:
+                            continue
+                        out = out_dir / f"{src.stem}_seg{seg_idx:03d}.mp4"
+                        produced = media_processor.trim_media(
+                            src, out, start=s, end=e, reencode=request.reencode
+                        )
+                        outputs.append(str(produced))
+
+            except media_processor.MediaError as exc:
+                skipped.append(f"{src.name} ({exc})")
+
+        report(fraction=1.0, message=f"Đã cắt xong {len(outputs)} file")
+        return {"outputs": outputs, "count": len(outputs), "skipped": skipped}
 
     return run_job("media_tools", work)
 

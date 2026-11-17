@@ -16,27 +16,14 @@ def _settings(tmp_path: Path) -> Settings:
     return Settings(models_dir=str(tmp_path / "models"))
 
 
-def test_translate_fails_fast_without_the_gguf(tmp_path: Path) -> None:
+def test_translate_rejects_unsupported_provider(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    calls: list[str] = []
-
-    def fake_ask(prompt: str, _settings: Settings, _system: str) -> str:  # pragma: no cover
-        calls.append(prompt)
-        return '{"lines": []}'
-
-    original = translate_service._ASKERS["local"]
-    translate_service._ASKERS["local"] = fake_ask
-    try:
-        with pytest.raises(translate_service.TranslateError, match="not installed"):
-            translate_service.translate(
-                [SubtitleSegment(index=1, start=0.0, end=1.0, text="xin chào")],
-                provider="local",
-                settings=settings,
-            )
-    finally:
-        translate_service._ASKERS["local"] = original
-
-    assert calls == []  # no batch was attempted, no retries burned
+    with pytest.raises(translate_service.TranslateError, match="Unsupported translation provider"):
+        translate_service.translate(
+            [SubtitleSegment(index=1, start=0.0, end=1.0, text="xin chào")],
+            provider="local",
+            settings=settings,
+        )
 
 
 def test_prompts_name_the_target_language() -> None:
@@ -341,22 +328,6 @@ def test_copied_source_ignores_a_source_already_in_the_target_language() -> None
     assert translate_service._copied_lines({1: "xin chào các bạn"}, chunk, "vi", "vi") == []
 
 
-def test_the_answer_budget_follows_the_batch_size() -> None:
-    one = translate_service._user_prompt(
-        [SubtitleSegment(index=1, start=0.0, end=1.0, text="你好")], "zh", "vi", "natural"
-    )
-    five = translate_service._user_prompt(
-        [SubtitleSegment(index=i, start=0.0, end=1.0, text="你好") for i in range(1, 6)],
-        "zh",
-        "vi",
-        "natural",
-    )
-
-    assert translate_service._budget(one) < translate_service._budget(five) <= 800
-    # A retry appends a reminder after the payload; the budget must still be found.
-    assert translate_service._budget(one + "\n\nAnswer again, in Vietnamese only.") < 800
-
-
 def test_vietnamese_style_rules_carry_address_forms_and_the_genre() -> None:
     system = translate_service._system_prompt("vi", "zh", "short drama for tiktok")
     assert "xưng hô" in system
@@ -469,40 +440,6 @@ def test_gemini_translation_groups_and_paces_by_the_profile(tmp_path: Path, monk
     assert sum(slept) == pytest.approx(4.0)  # the quiet gap between the two calls
     assert len(outcome.segments) == 60
     assert outcome.model == "gemini-3.1-flash-lite"
-
-
-# ---------------------------------------------------------------------------
-# Per-GGUF chat templates
-# ---------------------------------------------------------------------------
-def test_each_gguf_gets_its_own_chat_format() -> None:
-    """A Gemma loaded with chatml is fed tokens it never saw, and degrades quietly."""
-    assert translate_service._chat_format(Path("gemma-3-4b-it-q4_k_m.gguf")) == "gemma"
-    assert translate_service._chat_format(Path("qwen2.5-3b-instruct-q4_k_m.gguf")) == "chatml"
-
-
-def test_gemma_rules_ride_in_the_user_turn() -> None:
-    """llama.cpp's gemma formatter drops system messages, so the rules must not vanish."""
-    gemma = translate_service._messages(Path("gemma-3-4b-it-q4_k_m.gguf"), "P", "S")
-    qwen = translate_service._messages(Path("qwen2.5-3b-instruct-q4_k_m.gguf"), "P", "S")
-
-    assert gemma == [{"role": "user", "content": "S\n\nP"}]
-    assert qwen == [
-        {"role": "system", "content": "S"},
-        {"role": "user", "content": "P"},
-    ]
-    assert translate_service._messages(None, "P", "S") == qwen  # no weights, no surprise
-
-
-def test_the_missing_weights_error_names_the_chosen_model(tmp_path: Path) -> None:
-    settings = Settings(
-        models_dir=str(tmp_path / "models"),
-        llm_model_file="gemma-3-4b-it-q4_k_m.gguf",
-    )
-
-    message = str(translate_service._not_installed(settings))
-
-    assert "Gemma 3 4B IT" in message
-    assert "gemma-3-4b-it-q4_k_m.gguf" in message
 
 
 def test_a_cancel_during_the_pause_stops_before_the_next_request() -> None:

@@ -635,6 +635,7 @@ def render_final(
     use_nvenc: bool = False,
     flip_horizontal: bool = False,
     layers: Sequence[VisualLayer] = (),
+    video_clips: Sequence[Any] = (),
     start_time: float | None = None,
     sample_duration: float | None = None,
     progress: ProgressFn | None = None,
@@ -651,7 +652,12 @@ def render_final(
     target.parent.mkdir(parents=True, exist_ok=True)
 
     info = probe_video(source)
-    full_duration = info.duration or probe_duration(source)
+    valid_clips = [c for c in video_clips if getattr(c, "source_end", 0) > getattr(c, "source_start", 0) + 0.02]
+    full_duration = (
+        sum(float(c.source_end) - float(c.source_start) for c in valid_clips)
+        if valid_clips
+        else (info.duration or probe_duration(source))
+    )
     clip_start = max(float(start_time or 0.0), 0.0)
     duration = (
         min(float(sample_duration), max(full_duration - clip_start, 0.5))
@@ -678,6 +684,13 @@ def render_final(
         inputs.extend([*seek_args, "-i", str(background_path)])
         bg_index = next_index
         next_index += 1
+
+    logo_inputs: list[tuple[int, VisualLayer]] = []
+    for layer in layers:
+        if layer.kind == "logo" and layer.image_path and Path(layer.image_path).is_file():
+            inputs.extend(["-i", str(layer.image_path)])
+            logo_inputs.append((next_index, layer))
+            next_index += 1
 
     # --- video chain -------------------------------------------------------
     width, height = TARGET_ASPECTS.get(aspect, (info.width, info.height))
@@ -747,19 +760,75 @@ def render_final(
     audio_map: str | None = None
     filter_graph = ",".join(filters)
     complex_parts: list[str] = []
+    video_input_label = "[0:v]"
+    audio_input_label = "0"
+    if valid_clips:
+        v_segs: list[str] = []
+        a_segs: list[str] = []
+        for idx, clip in enumerate(valid_clips):
+            cs = float(clip.source_start)
+            ce = float(clip.source_end)
+            complex_parts.append(f"[0:v]trim=start={cs:.3f}:end={ce:.3f},setpts=PTS-STARTPTS[vc{idx}]")
+            v_segs.append(f"[vc{idx}]")
+            if info.has_audio and (keep_original_audio or dub_index is not None):
+                complex_parts.append(f"[0:a]atrim=start={cs:.3f}:end={ce:.3f},asetpts=PTS-STARTPTS[ac{idx}]")
+                a_segs.append(f"[ac{idx}]")
+        if len(v_segs) == 1:
+            video_input_label = v_segs[0]
+            if a_segs:
+                audio_input_label = a_segs[0]
+        else:
+            complex_parts.append(f"{''.join(v_segs)}concat=n={len(v_segs)}:v=1:a=0[vconcat]")
+            video_input_label = "[vconcat]"
+            if a_segs:
+                complex_parts.append(f"{''.join(a_segs)}concat=n={len(a_segs)}:v=0:a=1[aconcat]")
+                audio_input_label = "[aconcat]"
+
+    video_map = "0:v:0"
+    if logo_inputs:
+        v_chain = f"{video_input_label}{filter_graph}[vbase]"
+        complex_parts.append(v_chain)
+        current_v = "[vbase]"
+        for idx, (logo_idx, layer) in enumerate(logo_inputs):
+            lx = max(0, min(width - 4, int(round(layer.x * width))))
+            ly = max(0, min(height - 4, int(round(layer.y * height))))
+            lw = max(4, min(width - lx, int(round(layer.w * width))))
+            lh = max(4, min(height - ly, int(round(layer.h * height))))
+            enable_expr = ""
+            if layer.end > layer.start:
+                ls = max(0.0, layer.start - clip_start)
+                le = max(ls + 0.05, layer.end - clip_start)
+                enable_expr = f":enable='between(t,{ls:.3f},{le:.3f})'"
+            next_v = "[vout]" if idx == len(logo_inputs) - 1 else f"[vlg{idx}]"
+            complex_parts.append(
+                f"[{logo_idx}:v]scale={lw}:{lh}[lg{idx}];"
+                f"{current_v}[lg{idx}]overlay=x={lx}:y={ly}{enable_expr}{next_v}"
+            )
+            current_v = next_v
+        video_map = "[vout]"
     if dub_index is not None:
         # The bed is an explicit stem when one is supplied, otherwise the
         # clip's own soundtrack (input 0): the dub is mixed on top of it.
-        bed = bg_index if bg_index is not None else (0 if keep_original_audio and info.has_audio else None)
+        bed_label = (
+            f"[{bg_index}:a]"
+            if bg_index is not None
+            else (
+                audio_input_label
+                if audio_input_label.startswith("[")
+                else f"[{audio_input_label}:a]"
+            )
+            if keep_original_audio and info.has_audio
+            else None
+        )
         v_gain = min(max(voice_gain, 0.0), 3.0)
         dub_vol = f",volume={v_gain:.3f}" if abs(v_gain - 1.0) > 0.01 else ""
-        if bed is None:
+        if bed_label is None:
             complex_parts.append(f"[{dub_index}:a]aresample=48000{dub_vol}[aout]")
         else:
             gain = min(max(background_gain, 0.0), 1.0)
             if dub_vol:
                 complex_parts.append(
-                    f"[{bed}:a]aresample=48000,volume={gain:.3f}[bg];"
+                    f"{bed_label}aresample=48000,volume={gain:.3f}[bg];"
                     f"[{dub_index}:a]aresample=48000{dub_vol},asplit=2[dub1][dub2];"
                     f"[bg][dub1]sidechaincompress=threshold=0.03:ratio=9:attack=15:release=280[duck];"
                     f"[duck][dub2]amix=inputs=2:normalize=0:dropout_transition=0,"
@@ -767,23 +836,28 @@ def render_final(
                 )
             else:
                 complex_parts.append(
-                    f"[{bed}:a]aresample=48000,volume={gain:.3f}[bg];"
+                    f"{bed_label}aresample=48000,volume={gain:.3f}[bg];"
                     f"[bg][{dub_index}:a]sidechaincompress=threshold=0.03:ratio=9:attack=15:release=280[duck];"
                     f"[duck][{dub_index}:a]amix=inputs=2:normalize=0:dropout_transition=0,"
                     f"alimiter=limit=0.97[aout]"
                 )
         audio_map = "[aout]"
     elif keep_original_audio:
-        audio_map = "0:a?"
+        audio_map = audio_input_label if audio_input_label.startswith("[") else "0:a?"
 
     def _build_args(nvenc: bool) -> list[str]:
         cmd_args: list[str] = [*_base(quiet=True), *inputs]
         if complex_parts:
-            parts = [f"[0:v]{filter_graph}[vout]", *complex_parts]
+            if logo_inputs:
+                parts = complex_parts
+            elif valid_clips:
+                parts = [*complex_parts, f"{video_input_label}{filter_graph}[vout]"]
+            else:
+                parts = [f"[0:v]{filter_graph}[vout]", *complex_parts]
             cmd_args.extend(["-filter_complex", ";".join(parts)])
             cmd_args.extend(["-map", "[vout]"])
         else:
-            cmd_args.extend(["-vf", filter_graph, "-map", "0:v:0"])
+            cmd_args.extend(["-vf", filter_graph, "-map", video_map])
 
         if audio_map:
             cmd_args.extend(["-map", audio_map])

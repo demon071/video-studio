@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -38,6 +40,20 @@ class MediaTrimRequest(BaseModel):
     reencode: bool = False
 
 
+class MediaBatchTrimRequest(BaseModel):
+    video_paths: list[str] = Field(default_factory=list)
+    input_dir: str | None = None
+    output_dir: str
+    mode: Literal["head_tail", "range", "split_duration", "split_ranges"] = "head_tail"
+    trim_head: float = Field(default=0.0, ge=0.0)
+    trim_tail: float = Field(default=0.0, ge=0.0)
+    start: float = Field(default=0.0, ge=0.0)
+    end: float = Field(default=0.0, ge=0.0)
+    chunk_duration: float = Field(default=15.0, gt=0.2)
+    ranges: list[tuple[float, float]] = Field(default_factory=list)
+    reencode: bool = False
+
+
 class MediaConcatRequest(BaseModel):
     video_paths: list[str]
     output_path: str
@@ -58,7 +74,15 @@ class MediaMuxRequest(BaseModel):
     audio_gain: float = Field(default=1.0, ge=0.0, le=3.0)
 
 
+class TimelineCutRequest(BaseModel):
+    video_path: str
+    mode: Literal["trim_left", "trim_right", "delete_range"]
+    start: float = Field(default=0.0, ge=0.0)
+    end: float = Field(default=0.0, ge=0.0)
+
+
 __all__ = [
+    "MediaBatchTrimRequest",
     "MediaConcatRequest",
     "MediaDemuxRequest",
     "MediaMuxRequest",
@@ -67,4 +91,5 @@ __all__ = [
     "ProbeResult",
     "ThumbnailRequest",
     "ThumbnailResult",
+    "TimelineCutRequest",
 ]

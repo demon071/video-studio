@@ -146,42 +146,6 @@ CATALOG: tuple[ModelSpec, ...] = (
         folder_name="sensevoice",
     ),
     ModelSpec(
-        key="qwen2.5-3b-instruct-q4_k_m",
-        kind="llm",
-        label="Qwen2.5 3B Instruct (Q4_K_M)",
-        description="Offline subtitle translation with JSON-constrained output; the default translator.",
-        size_mb=1980,
-        files=(
-            RemoteFile(
-                filename="qwen2.5-3b-instruct-q4_k_m.gguf",
-                repo_id="Qwen/Qwen2.5-3B-Instruct-GGUF",
-                size_mb=1980,
-            ),
-        ),
-        requires=("llama_cpp",),
-        licence="Apache-2.0",
-    ),
-    ModelSpec(
-        key="gemma3-4b-it-q4_k_m",
-        kind="llm",
-        label="Gemma 3 4B IT (Q4_K_M)",
-        description=(
-            "Second offline translator: Google's multilingual 4B, larger and slower "
-            "per line than the 3B. Pick it in Settings → Dịch offline."
-        ),
-        size_mb=2375,
-        files=(
-            RemoteFile(
-                filename="gemma-3-4b-it-q4_k_m.gguf",
-                repo_id="unsloth/gemma-3-4b-it-GGUF",
-                repo_path="gemma-3-4b-it-Q4_K_M.gguf",
-                size_mb=2375,
-            ),
-        ),
-        requires=("llama_cpp",),
-        licence="Gemma",
-    ),
-    ModelSpec(
         key="uvr-mdx-inst-hq3",
         kind="separator",
         label="UVR MDX-Net Inst HQ3",
@@ -574,46 +538,6 @@ def whisper_reference(size: str, settings: Settings | None = None) -> tuple[str,
     return f"Systran/faster-whisper-{size}", root
 
 
-def llm_specs() -> list[ModelSpec]:
-    """Catalogue entries that can translate offline (``kind == "llm"``)."""
-    return [spec for spec in CATALOG if spec.kind == "llm"]
-
-
-def llm_filenames() -> dict[str, str]:
-    """``{gguf filename: label}`` — every value ``settings.llm_model_file`` may take.
-
-    The filename (not the catalogue key) is what the settings document stores, so
-    the picker and the resolver cannot drift apart.
-    """
-    return {
-        item.filename: spec.label
-        for spec in llm_specs()
-        for item in spec.files
-        if item.filename.endswith(".gguf")
-    }
-
-
-def llm_label(filename: str) -> str:
-    """Readable name for a GGUF file, or the filename itself when it is unknown."""
-    return llm_filenames().get(filename, filename)
-
-
-def llm_path(settings: Settings | None = None) -> Path | None:
-    """Locate the GGUF named by ``settings.llm_model_file``.
-
-    ``download()`` writes into ``llm/<catalogue key>/``; the flat ``llm/<file>``
-    layout is still accepted for a hand-copied model.
-    """
-    settings = settings or get_settings()
-    filename = settings.llm_model_file
-    candidates = [model_dir(spec, settings) / filename for spec in llm_specs()]
-    candidates.append(model_root(settings) / "llm" / filename)
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
-
-
 def separator_dir(settings: Settings | None = None) -> Path:
     settings = settings or get_settings()
     folder = model_root(settings) / "separator"
@@ -629,10 +553,6 @@ __all__ = [
     "ModelStatus",
     "download",
     "list_models",
-    "llm_filenames",
-    "llm_label",
-    "llm_path",
-    "llm_specs",
     "model_dir",
     "model_root",
     "remove",

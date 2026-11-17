@@ -30,6 +30,31 @@ export async function pickVideo(): Promise<string | null> {
   return typeof selection === "string" ? selection : null;
 }
 
+export async function pickVideos(): Promise<string[]> {
+  if (!isDesktop) return [];
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selection = await open({
+    title: "Chọn nhiều video vào hàng đợi",
+    multiple: true,
+    directory: false,
+    filters: [{ name: "Video", extensions: ["mp4", "mov", "mkv", "webm", "avi", "m4v"] }],
+  });
+  if (Array.isArray(selection)) return selection.filter((v): v is string => typeof v === "string");
+  return typeof selection === "string" ? [selection] : [];
+}
+
+export async function pickImage(): Promise<string | null> {
+  if (!isDesktop) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selection = await open({
+    title: "Chọn ảnh logo / hình chèn",
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "bmp"] }],
+  });
+  return typeof selection === "string" ? selection : null;
+}
+
 export async function pickSavePath(defaultName: string): Promise<string | null> {
   if (!isDesktop) return null;
   const { save } = await import("@tauri-apps/plugin-dialog");

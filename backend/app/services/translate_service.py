@@ -5,12 +5,13 @@ leave this module. That is the whole trick behind "translate without breaking
 sync": the model returns ``{id -> text}`` pairs and the original timeline is
 re-assembled around them.
 
-Providers:
-  * ``local``  llama-cpp-python + Qwen2.5-3B or Gemma 3 4B GGUF, JSON grammar enforced
-  * ``gemini`` google-genai, request shape taken from ``GEMINI_PROFILES``
-  * ``openai`` OpenAI chat completions
-  * ``google`` free Google Translate web endpoint (see ``web_translate``)
-  * ``bing``   free Bing Translator web endpoint
+Providers (ported from CapCap):
+  * ``gemini``   google-genai, request shape taken from ``GEMINI_PROFILES``
+  * ``deepseek`` DeepSeek API (OpenAI-compatible)
+  * ``openai``   OpenAI chat completions
+  * ``ollama``   Ollama local server (OpenAI-compatible)
+  * ``google``   free Google Translate web endpoint (with automatic Bing fallback)
+  * ``bing``     free Bing Translator web endpoint
 """
 
 from __future__ import annotations
@@ -355,14 +356,6 @@ class TranslateError(RuntimeError):
     """Raised when every chunk failed or the provider is unusable."""
 
 
-def _not_installed(settings: Settings) -> TranslateError:
-    """Actionable error for a missing GGUF (the UI shows this text verbatim)."""
-    return TranslateError(
-        f"{model_manager.llm_label(settings.llm_model_file)} ({settings.llm_model_file}) is not "
-        "installed. Open the Models panel and download it, or switch the provider to Gemini."
-    )
-
-
 @dataclass(frozen=True)
 class TranslationOutcome:
     provider: str
@@ -371,94 +364,8 @@ class TranslationOutcome:
     failed_chunks: int = 0
 
 
-# ---------------------------------------------------------------------------
-# LLM lifecycle (a GGUF model is expensive to load, keep one warm)
-# ---------------------------------------------------------------------------
-_LLM_LOCK = threading.Lock()
-_LLM: Any = None
-_LLM_KEY: tuple[str, int] | None = None
-
-# llama.cpp must render the turn markers the weights were trained on: Qwen2.5
-# answers chatml, Gemma answers <start_of_turn>. A Gemma loaded with chatml gets
-# tokens it never saw and degrades quietly instead of failing.
-_CHAT_FORMATS = {"gemma": "gemma"}
-
-
-def _chat_format(path: Path) -> str:
-    """Chat template name for the GGUF, matched loosely on the file name."""
-    name = path.name.lower()
-    for marker, chat_format in _CHAT_FORMATS.items():
-        if marker in name:
-            return chat_format
-    return "chatml"
-
-
-def _messages(path: Path | None, prompt: str, system: str) -> list[dict[str, str]]:
-    """Chat turns for the loaded GGUF.
-
-    Gemma's formatter has no system role - llama.cpp drops the message with a
-    debug line - so its rules would vanish and every line would be translated
-    without the address-form guidance. They ride inside the user turn instead,
-    which is exactly what Gemma's own template does with a system message.
-    """
-    if path is not None and _chat_format(path) == "gemma":
-        return [{"role": "user", "content": f"{system}\n\n{prompt}"}]
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": prompt},
-    ]
-
-
 def unload() -> None:
-    global _LLM, _LLM_KEY
-    with _LLM_LOCK:
-        _LLM = None
-        _LLM_KEY = None
     hardware.release_vram()
-    log.debug("llama-cpp model unloaded")
-
-
-def _load_llm(settings: Settings):
-    global _LLM, _LLM_KEY
-    path = model_manager.llm_path(settings)
-    if path is None:
-        raise _not_installed(settings)
-
-    profile = hardware.detect()
-    layers = settings.llm_gpu_layers
-    if layers < 0:
-        layers = profile.llm_gpu_layers  # -1 = all blocks, or a VRAM-clamped count
-    key = (str(path), int(layers))
-
-    with _LLM_LOCK:
-        if _LLM is not None and key == _LLM_KEY:
-            return _LLM
-        if _LLM is not None:
-            # Switching GGUF: let go of the old weights before the new ones are
-            # mapped, otherwise both models sit in VRAM on a small card.
-            _LLM = None
-            _LLM_KEY = None
-            hardware.release_vram()
-        try:
-            from llama_cpp import Llama  # noqa: PLC0415
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise TranslateError(
-                "Offline translation needs llama-cpp-python "
-                "(pip install llama-cpp-python). Switch to the Gemini provider instead."
-            ) from exc
-
-        log.info("loading GGUF %s (gpu_layers=%s)", path.name, layers)
-        _LLM = Llama(
-            model_path=str(path),
-            n_ctx=settings.llm_context,
-            n_gpu_layers=layers,
-            n_threads=hardware.cpu_threads(settings),
-            n_batch=256,
-            verbose=False,
-            chat_format=_chat_format(path),
-        )
-        _LLM_KEY = key
-        return _LLM
 
 
 # ---------------------------------------------------------------------------
@@ -729,81 +636,6 @@ def _copied_lines(
     return copied
 
 
-# The grammar is built from this schema, so a 3B model physically cannot answer
-# with the wrong shape (llama-cpp falls back to generic JSON only if the schema
-# cannot be compiled).
-_LINES_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "lines": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"i": {"type": "integer"}, "t": {"type": "string"}},
-                "required": ["i", "t"],
-            },
-        }
-    },
-    "required": ["lines"],
-}
-
-
-def _ask_local(prompt: str, settings: Settings, system: str) -> str:
-    return _complete_local(prompt, settings, system, schema=_LINES_SCHEMA, max_tokens=_budget(prompt))
-
-
-def _budget(prompt: str) -> int:
-    """How many tokens this answer may use.
-
-    A 3B model that starts looping ("十年前十年前十年前...") only stops at the
-    cap, and a cap of 800 turns one bad line into a minute of GPU time. Sizing
-    the budget from the number of lines asked for cuts that to seconds.
-    """
-    for line in reversed(prompt.splitlines()):
-        text = line.lstrip()
-        if not text.startswith("["):
-            continue
-        try:
-            lines = len(json.loads(text))
-        except ValueError:
-            break
-        return max(120, min(800, 90 + 70 * lines))
-    return 800
-
-
-def _complete_local(
-    prompt: str,
-    settings: Settings,
-    system: str,
-    *,
-    schema: dict[str, Any] | None = None,
-    max_tokens: int = 800,
-) -> str:
-    llm = _load_llm(settings)
-    path = model_manager.llm_path(settings)
-    response_format: dict[str, Any] = {"type": "json_object"}
-    if schema is not None:
-        response_format["schema"] = schema
-    response = llm.create_chat_completion(
-        messages=_messages(path, prompt, system),
-        temperature=0.2,
-        top_p=0.9,
-        # Without a penalty the model repeats one fragment until max_tokens;
-        # with it a stuck line comes back as a short answer that fails
-        # validation instead of a long one that fails it slowly.
-        repeat_penalty=1.15,
-        frequency_penalty=0.2,
-        # 5 short lines need ~250 tokens; a runaway model otherwise rambles for
-        # a full minute repeating the same JSON blocks before hitting the cap.
-        max_tokens=max_tokens,
-        response_format=response_format,
-    )
-    choices = response.get("choices") or []
-    if not choices:
-        raise TranslateError("llama-cpp returned no choices")
-    return (choices[0].get("message") or {}).get("content") or ""
-
-
 def _gemini_thinking(types: Any, profile: GeminiProfile) -> Any:
     """``ThinkingConfig`` for the profile, or None when the model takes none.
 
@@ -924,7 +756,6 @@ def _ask_ollama(prompt: str, settings: Settings, system: str) -> str:
 
 
 _ASKERS = {
-    "local": _ask_local,
     "gemini": _ask_gemini,
     "openai": _ask_openai,
     "deepseek": _ask_deepseek,
@@ -1243,17 +1074,16 @@ def analyze_dialogue_context(
     if not segments:
         return "", "none", "", 0
 
-    chosen = (provider or settings.translate_provider or "local").lower()
+    chosen = (provider or settings.translate_provider or "gemini").lower()
     if chosen in _WEB_PROVIDERS or chosen not in _ASKERS:
-        chosen = "gemini" if api_key("gemini", settings) else "local"
+        chosen = "gemini"
 
     model_name = {
-        "local": settings.llm_model_file,
         "gemini": settings.gemini_model,
         "openai": settings.openai_chat_model,
         "deepseek": settings.deepseek_chat_model,
         "ollama": settings.ollama_chat_model,
-    }.get(chosen, settings.llm_model_file)
+    }.get(chosen, settings.gemini_model)
 
     sample = segments if len(segments) <= max_cues else segments[:200]
     lines: list[str] = []
@@ -1298,12 +1128,7 @@ def analyze_dialogue_context(
     user_prompt = "\n".join(lines)
 
     try:
-        if chosen == "local":
-            if model_manager.llm_path(settings) is None:
-                raise _not_installed(settings)
-            raw = _complete_local(user_prompt, settings, system_prompt, schema=_SHORTEN_SCHEMA, max_tokens=600)
-        else:
-            raw = _ASKERS[chosen](user_prompt, settings, system_prompt)
+        raw = _ASKERS[chosen](user_prompt, settings, system_prompt)
         parsed = _parse_shortened(raw) or raw.strip()
     except Exception as exc:  # noqa: BLE001
         log.warning("dialogue context analysis failed (%s)", exc)
@@ -1330,7 +1155,7 @@ def translate(
     if not segments:
         raise TranslateError("No subtitle lines to translate")
 
-    chosen = (provider or settings.translate_provider or "local").lower()
+    chosen = (provider or settings.translate_provider or "google").lower()
     if chosen in _WEB_PROVIDERS:
         return _translate_web(
             segments,
@@ -1344,21 +1169,11 @@ def translate(
 
     ask = _ASKERS[chosen]
     model_name = {
-        "local": settings.llm_model_file,
         "gemini": settings.gemini_model,
         "openai": settings.openai_chat_model,
         "deepseek": settings.deepseek_chat_model,
         "ollama": settings.ollama_chat_model,
     }[chosen]
-
-    # Fail once, up-front, when the weights are missing: retrying 2x per batch
-    # would just log the same configuration error a dozen times.
-    if chosen == "local" and model_manager.llm_path(settings) is None:
-        raise _not_installed(settings)
-
-    # The LLM needs the VRAM the whisper model was holding.
-    if chosen == "local":
-        stt_service.unload()
 
     # Gemini is billed per *request*, and a free-tier key is limited per minute:
     # the model decides how many lines fit in one call and how long to breathe.
@@ -1515,7 +1330,7 @@ def shorten_for_timing(
         return text
 
     settings = settings or get_settings()
-    chosen = (provider or settings.translate_provider or "local").lower()
+    chosen = (provider or settings.translate_provider or "google").lower()
     prompt = (
         f"Language: {_language_name(language)}\n"
         f"Character limit: {max_chars}\n"
@@ -1523,14 +1338,11 @@ def shorten_for_timing(
     )
     try:
         ask = _ASKERS.get(chosen)
-        # "local" and the web translators (Google/Bing only translate, they
-        # cannot rephrase) both go through the local model.
-        if chosen == "local" or ask is None:
-            if model_manager.llm_path(settings) is None:
+        if ask is None:
+            if api_key("gemini", settings):
+                raw = _ask_gemini(prompt, settings, _SHORTEN_SYSTEM)
+            else:
                 return text
-            raw = _complete_local(
-                prompt, settings, _SHORTEN_SYSTEM, schema=_SHORTEN_SCHEMA, max_tokens=200
-            )
         else:
             raw = ask(prompt, settings, _SHORTEN_SYSTEM)
     except Cancelled:

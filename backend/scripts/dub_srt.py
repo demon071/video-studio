@@ -112,7 +112,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Dub an SRT with the engine's own pipeline.")
     parser.add_argument("srt", type=Path, help="subtitle file to speak")
     parser.add_argument("-o", "--out", type=Path, default=None, help="track path (default: <srt>.dub.wav)")
-    parser.add_argument("-p", "--provider", default="omnivoice", help="capcut | omnivoice | voicestudio")
+    parser.add_argument("-p", "--provider", default="omnivoice", help="capcut | omnivoice | elevenlabs")
     parser.add_argument("-v", "--voice", default=None, help="auto, design:<words> or clone:<wav>")
     parser.add_argument("-s", "--steps", type=int, default=16, help="OmniVoice diffusion steps (4-64)")
     parser.add_argument("-l", "--language", default="vi", help="language the voice reads")

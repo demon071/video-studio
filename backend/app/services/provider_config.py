@@ -45,9 +45,9 @@ TIMEOUT = httpx.Timeout(connect=15.0, read=30.0, write=15.0, pool=15.0)
 # what the UI renders.
 SLOTS: dict[str, tuple[str, ...]] = {
     "gemini": ("model",),
-    "openai": ("model", "stt_model"),
-    "groq": ("model",),
-    "voicestudio": ("model",),
+    "openai": ("model",),
+    "deepseek": ("model",),
+    "ollama": ("model",),
 }
 
 
@@ -140,41 +140,31 @@ PROVIDERS: dict[str, ProviderSpec] = {
         base_url="https://api.openai.com/v1",
         slots=(
             ("model", "Model dịch (chat)", ("gpt-4.1-mini", "gpt-4o-mini", "gpt-4.1", "gpt-4o")),
-            ("stt_model", "Model nhận dạng", ("whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe")),
         ),
-        notes="Nhận dạng giọng nói và dịch dùng chung một key.",
+        notes="Dùng để dịch phụ đề.",
     ),
-    "groq": ProviderSpec(
-        name="groq",
-        label="Groq",
-        kind="stt",
-        key_hint="Lấy API key tại https://console.groq.com/keys",
-        key_url="https://console.groq.com/keys",
-        base_url="https://api.groq.com/openai/v1",
+    "deepseek": ProviderSpec(
+        name="deepseek",
+        label="DeepSeek",
+        kind="translate",
+        key_hint="Lấy API key tại https://platform.deepseek.com/api_keys",
+        key_url="https://platform.deepseek.com/api_keys",
+        base_url="https://api.deepseek.com/v1",
         slots=(
-            (
-                "model",
-                "Model nhận dạng",
-                ("whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"),
-            ),
+            ("model", "Model dịch", ("deepseek-chat", "deepseek-reasoner")),
         ),
-        notes="Whisper trên LPU: nhanh nhất trong các lựa chọn online.",
+        notes="DeepSeek API (tương thích OpenAI, dịch thoại Trung-Việt mượt và rẻ).",
     ),
-    "voicestudio": ProviderSpec(
-        name="voicestudio",
-        label="VoiceStudio (OmniVoice, local)",
-        kind="tts",
-        key_hint=(
-            "Chỉ cần khi server VoiceStudio chạy với OMNIVOICE_API_KEY "
-            "(Docker hoặc máy khác). Gọi từ cùng máy thì để trống."
+    "ollama": ProviderSpec(
+        name="ollama",
+        label="Ollama (Local Server)",
+        kind="translate",
+        key_hint="Không cần API key (để trống nếu chạy trên localhost:11434).",
+        base_url="http://127.0.0.1:11434/v1",
+        slots=(
+            ("model", "Model Ollama", ("qwen2.5:7b", "qwen2.5:14b", "gemma3:12b")),
         ),
-        base_url="http://127.0.0.1:3900/v1",
-        slots=(("model", "Model giọng đọc", ("tts-1",)),),
-        notes=(
-            "VoiceStudio (github.com/debpalash/voicestudio) mở API kiểu OpenAI ở cổng 3900; "
-            "engine mặc định của nó là OmniVoice của k2-fsa. Cài app hoặc chạy Docker, rồi chọn "
-            "VoiceStudio ở bước 3 · Lồng tiếng."
-        ),
+        notes="Chạy model dịch trên server Ollama nội bộ.",
     ),
 }
 
@@ -182,28 +172,25 @@ PROVIDERS: dict[str, ProviderSpec] = {
 _SLOT_FIELDS: dict[tuple[str, str], str] = {
     ("gemini", "model"): "gemini_model",
     ("openai", "model"): "openai_chat_model",
-    ("openai", "stt_model"): "openai_stt_model",
-    ("groq", "model"): "groq_stt_model",
-    ("voicestudio", "model"): "voicestudio_model",
+    ("deepseek", "model"): "deepseek_chat_model",
+    ("ollama", "model"): "ollama_chat_model",
 }
 
 _KEY_ENV_ALIASES = {
     "gemini": ("GOOGLE_AI_STUDIO_API_KEY", "GEMINI_API_KEY"),
     "openai": ("OPENAI_API_KEY",),
-    "groq": ("GROQ_API_KEY",),
-    "voicestudio": ("OMNIVOICE_API_KEY", "VOICESTUDIO_API_KEY"),
+    "deepseek": ("DEEPSEEK_API_KEY",),
 }
 
 _SLOT_ENV_ALIASES = {
     ("gemini", "model"): ("SVA_GEMINI_MODEL", "GEMINI_MODEL", "GOOGLE_AI_STUDIO_MODEL"),
     ("openai", "model"): ("SVA_OPENAI_CHAT_MODEL", "OPENAI_MODEL"),
-    ("openai", "stt_model"): ("SVA_OPENAI_STT_MODEL",),
-    ("groq", "model"): ("SVA_GROQ_STT_MODEL", "GROQ_MODEL"),
-    ("voicestudio", "model"): ("SVA_VOICESTUDIO_MODEL",),
+    ("deepseek", "model"): ("SVA_DEEPSEEK_MODEL", "DEEPSEEK_MODEL"),
+    ("ollama", "model"): ("SVA_OLLAMA_MODEL", "OLLAMA_MODEL"),
 }
 
-# OCR engine names the UI may pick, and the speed/accuracy profiles.
-OCR_ENGINES = ("rapidocr", "paddleocr", "easyocr")
+# OCR engine names the UI may pick (CapCap: rapidocr and Windows Media OCR).
+OCR_ENGINES = ("rapidocr", "winocr")
 OCR_PROFILES = ("small", "tiny")
 # Where the frame reader runs: auto = GPU when the ONNX build has one, CPU
 # otherwise. Reading frames is the slow half of OCR, so the default now tries
@@ -238,8 +225,6 @@ def _blank() -> dict[str, Any]:
     return {
         "version": CONFIG_VERSION,
         "providers": {name: {slot: "" for slot in ("api_key", "base_url", *SLOTS[name])} for name in PROVIDERS},
-        # Which GGUF the offline translator loads. Empty = the engine default.
-        "llm": {"model": ""},
         "ocr": {"engine": "", "profile": "", "region": "", "device": ""},
         "audio": {"mode": ""},
     }
@@ -257,7 +242,6 @@ def _merge(document: dict[str, Any]) -> dict[str, Any]:
                     if isinstance(value, str):
                         merged["providers"][name][key] = value.strip()
     for section, keys in (
-        ("llm", ("model",)),
         ("ocr", ("engine", "profile", "region", "device")),
         ("audio", ("mode",)),
     ):
@@ -342,15 +326,6 @@ def save(patch: dict[str, Any], settings: Settings | None = None) -> dict[str, A
                 if key not in document["providers"][name] or not isinstance(value, str):
                     continue
                 document["providers"][name][key] = value.strip()
-    llm = patch.get("llm")
-    if isinstance(llm, dict) and "model" in llm:
-        # Only a GGUF the catalogue can download: a typo here would otherwise
-        # surface as "not installed" on the first translation instead of at save.
-        model = str(llm.get("model", "")).strip()
-        if model and model not in model_manager.llm_filenames():
-            raise ProviderConfigError(f"Model dịch offline không hợp lệ: {model}")
-        document["llm"]["model"] = model
-
     ocr = patch.get("ocr")
     if isinstance(ocr, dict):
         engine = str(ocr.get("engine", "")).strip().lower()
@@ -488,9 +463,6 @@ def overlay(settings: Settings | None = None) -> Settings:
         if values.get("base_url"):
             updates[f"{name}_base_url"] = values["base_url"]
 
-    if document["llm"]["model"]:
-        updates["llm_model_file"] = document["llm"]["model"]
-
     ocr = document["ocr"]
     if ocr["engine"]:
         updates["ocr_engine"] = ocr["engine"]
@@ -526,38 +498,8 @@ def describe(settings: Settings | None = None) -> dict[str, Any]:
         "providers": [
             PROVIDERS[name].to_dict(document["providers"][name], settings) for name in PROVIDERS
         ],
-        "llm": _describe_llm(settings, document),
         "ocr": _describe_ocr(settings, document),
         "audio": _describe_audio(settings),
-    }
-
-
-def _describe_llm(settings: Settings, document: dict[str, Any]) -> dict[str, Any]:
-    """The offline GGUF choices, their install state and which one runs."""
-    active = document["llm"]["model"] or settings.llm_model_file
-    options = []
-    for spec in model_manager.llm_specs():
-        status = model_manager.status(spec, settings)
-        filename = spec.files[0].filename if spec.files else ""
-        options.append(
-            {
-                "key": spec.key,
-                "label": spec.label,
-                "description": spec.description,
-                "filename": filename,
-                "size_mb": spec.size_mb,
-                "installed": status.downloaded,
-                "missing_packages": list(status.missing_packages),
-                "active": filename == active,
-                "licence": spec.licence,
-            }
-        )
-    return {
-        "model": active,
-        # False when the active GGUF is not on disk: translation would refuse.
-        "ready": model_manager.llm_path(settings.model_copy(update={"llm_model_file": active})) is not None,
-        "engine_default": settings.llm_model_file,
-        "options": options,
     }
 
 
@@ -700,14 +642,6 @@ def _gemini_models(base_url: str, key: str) -> list[str]:
     return sorted(names)
 
 
-def _voicestudio_status(settings: Settings, base_url: str, key: str) -> str:
-    """Probe the local VoiceStudio backend; the key is optional on loopback."""
-    from app.services import voicestudio_tts  # noqa: PLC0415 - keeps the import graph flat
-
-    configured = settings.model_copy(update={"voicestudio_base_url": base_url, "voicestudio_api_key": key})
-    return voicestudio_tts.reachable(configured)
-
-
 def test_connection(
     name: str,
     settings: Settings | None = None,
@@ -728,13 +662,6 @@ def test_connection(
             values[key] = value.strip()
     key = values.get("api_key") or _env_value(name, settings)
     base_url = values.get("base_url") or PROVIDERS[name].base_url
-    if name == "voicestudio":
-        # A loopback VoiceStudio answers without any credential, so an empty key
-        # is a valid setup rather than an error.
-        try:
-            return TestOutcome(True, _voicestudio_status(settings, base_url, key))
-        except Exception as exc:  # noqa: BLE001 - connection errors are the answer
-            return TestOutcome(False, str(exc))
     if not key:
         return TestOutcome(False, "Chưa có API key.")
 

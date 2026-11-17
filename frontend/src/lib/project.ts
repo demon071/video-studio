@@ -37,7 +37,7 @@ const DEFAULT_SETTINGS: ProjectSnapshot["settings"] = {
   whisperSize: "medium",
   sourceLanguage: "auto",
   targetLanguage: "vi",
-  translateProvider: "local",
+  translateProvider: "google",
   translateStyle: "",
   useTranslationForDub: true,
   ttsProvider: "capcut",
@@ -55,9 +55,11 @@ function asAspect(value: string | undefined, fallback: Aspect): Aspect {
   return value === "9:16" || value === "16:9" || value === "1:1" ? value : fallback;
 }
 
-/** A project saved with a retired engine (edge, piper, …) dubs with CapCut again. */
+/** A project saved with a retired engine (edge, voicestudio, …) dubs with CapCut again. */
 function asTtsProvider(value: string): TtsProvider {
-  return value === "omnivoice" || value === "voicestudio" ? value : "capcut";
+  return value === "omnivoice" || value === "elevenlabs" || value === "piper" || value === "vieneu"
+    ? value
+    : "capcut";
 }
 
 /* ---------------------------------------------------------------------------

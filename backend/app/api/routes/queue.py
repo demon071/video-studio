@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.services.queue_service import QueueMode, queue_manager
@@ -15,7 +15,8 @@ router = APIRouter(tags=["queue"])
 class QueueAddRequest(BaseModel):
     video_paths: list[str] = Field(min_length=1)
     source_mode: Literal["audio", "ocr", "auto"] = "audio"
-    target_language: str = "Vietnamese"
+    stt_provider: Literal["local", "sensevoice", "ocr", "capcut"] | None = None
+    target_language: str = "vi"
     translate_provider: str = "google"
     translate_preset: str = "general"
     tts_provider: str = "capcut"
@@ -42,6 +43,7 @@ def add_to_queue(request: QueueAddRequest) -> dict:
     return queue_manager.add_items(
         request.video_paths,
         source_mode=request.source_mode,
+        stt_provider=request.stt_provider,
         target_language=request.target_language,
         translate_provider=request.translate_provider,
         translate_preset=request.translate_preset,
@@ -59,6 +61,16 @@ def start_queue(request: QueueStartRequest) -> dict:
 @router.post("/api/queue/stop")
 def stop_queue(request: QueueStopRequest) -> dict:
     return queue_manager.request_stop(immediate=request.immediate)
+
+
+@router.get("/api/queue/{item_id}/preview")
+def preview_queue_item(item_id: str) -> dict:
+    try:
+        return queue_manager.get_preview(item_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/api/queue/{item_id}")

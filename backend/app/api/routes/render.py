@@ -52,6 +52,7 @@ def render(request: RenderRequest) -> RenderResult:
                 use_nvenc=request.use_nvenc,
                 flip_horizontal=request.flip_horizontal,
                 layers=request.layers,
+                video_clips=request.video_clips,
                 start_time=request.start_time,
                 sample_duration=request.sample_duration,
                 progress=lambda value: report(fraction=value, message="encoding"),

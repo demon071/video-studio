@@ -114,10 +114,12 @@ class ProjectSummary(BaseModel):
     modified: float = Field(default=0.0, description="mtime in epoch seconds, for sorting")
     size_bytes: int = 0
     damaged: bool = Field(default=False, description="The file exists but could not be parsed")
+    cached: bool = Field(default=False, description="True for unsaved autosave/cache snapshots")
 
 
 class ProjectListResult(BaseModel):
     projects: list[ProjectSummary] = Field(default_factory=list)
+    cached_projects: list[ProjectSummary] = Field(default_factory=list)
     folder: str = ""
 
 

@@ -20,7 +20,6 @@ from app.services import (
     stt_service,
     translate_service,
     tts_service,
-    voicestudio_tts,
     web_translate,
 )
 
@@ -81,9 +80,6 @@ def test_web_translation_never_touches_the_llm(monkeypatch: pytest.MonkeyPatch) 
         return [text.upper() for text in texts]
 
     monkeypatch.setattr(translate_service.web_translate, "translate_texts", fake_translate)
-    monkeypatch.setattr(
-        translate_service, "_complete_local", lambda *args, **kwargs: pytest.fail("the LLM must not run")
-    )
 
     outcome = translate_service.translate(
         [SubtitleSegment(index=1, start=0.0, end=1.0, text="xin chào")],
@@ -402,17 +398,23 @@ def test_dub_extension_and_voice_defaults_cover_the_three_providers() -> None:
 
     assert tts_service.DEFAULT_PROVIDER == "capcut"
     assert tts_service._raw_extension("capcut") == "mp3"
+    assert tts_service._raw_extension("elevenlabs") == "mp3"
     assert tts_service._raw_extension("omnivoice") == "wav"
-    assert tts_service._raw_extension("voicestudio") == "wav"
+    assert tts_service._raw_extension("piper") == "wav"
+    assert tts_service._raw_extension("vieneu") == "wav"
     assert tts_service.resolve_voice("capcut", None, settings) == settings.capcut_voice
     assert tts_service.resolve_voice("omnivoice", None, settings) == omnivoice_tts.DEFAULT_VOICE
-    assert tts_service.resolve_voice("voicestudio", None, settings) == settings.voicestudio_voice
+    assert tts_service.resolve_voice("elevenlabs", None, settings) == "21m00Tcm4TlvDq8ikWAM"
+    assert tts_service.resolve_voice("piper", None, settings) == settings.piper_voice
+    assert tts_service.resolve_voice("vieneu", None, settings) == settings.vieneu_voice
 
 
 def test_a_retired_engine_is_rejected_instead_of_dubbing_silently() -> None:
-    """Projects and requests saved with edge/piper/vieneu must fail loudly."""
+    """Projects and requests saved with edge or voicestudio must fail loudly."""
     with pytest.raises(tts_service.TtsError, match="edge"):
         tts_service.resolve_voice("edge", None, Settings())
+    with pytest.raises(tts_service.TtsError, match="voicestudio"):
+        tts_service.resolve_voice("voicestudio", None, Settings())
 
 
 def test_omnivoice_voice_strings_split_into_the_three_modes() -> None:
@@ -453,38 +455,16 @@ def test_omnivoice_reuses_one_clone_prompt_per_reference(tmp_path) -> None:
     omnivoice_tts._PROMPTS.clear()
 
 
-def test_voicestudio_normalises_the_url_and_voice() -> None:
-    assert voicestudio_tts.base_url(Settings(voicestudio_base_url="")) == voicestudio_tts.DEFAULT_URL
-    assert (
-        voicestudio_tts.base_url(Settings(voicestudio_base_url="127.0.0.1:3900"))
-        == "http://127.0.0.1:3900/v1"
-    )
-    assert (
-        voicestudio_tts.base_url(Settings(voicestudio_base_url="http://box:3900/v1/")) == "http://box:3900/v1"
-    )
-    assert voicestudio_tts.resolve_voice("voicestudio:alloy", Settings()) == "alloy"
-    assert (
-        voicestudio_tts.resolve_voice(None, Settings(voicestudio_voice="")) == voicestudio_tts.DEFAULT_VOICE
-    )
-
-
-def test_voicestudio_key_falls_back_to_the_omnivoice_variable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("VOICESTUDIO_API_KEY", raising=False)
-    monkeypatch.setenv("OMNIVOICE_API_KEY", "server-key")
-
-    assert voicestudio_tts.api_key(Settings(voicestudio_api_key="")) == "server-key"
-    assert voicestudio_tts.api_key(Settings(voicestudio_api_key="typed")) == "typed"
-
-
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
 def test_requests_accept_the_new_providers() -> None:
-    assert TranscribeRequest(video_path="clip.mp4", provider="bilibili").provider == "bilibili"
+    assert TranscribeRequest(video_path="clip.mp4", provider="capcut").provider == "capcut"
+    assert TranscribeRequest(video_path="clip.mp4", provider="sensevoice").provider == "sensevoice"
     assert TranscribeRequest(video_path="clip.mp4", provider="ocr").provider == "ocr"
     assert TranslateRequest(segments=[], provider="bing").provider == "bing"
     assert DubbingRequest(segments=[], provider="omnivoice").provider == "omnivoice"
-    assert DubbingRequest(segments=[], provider="voicestudio").provider == "voicestudio"
+    assert DubbingRequest(segments=[], provider="elevenlabs").provider == "elevenlabs"
+    assert DubbingRequest(segments=[], provider="piper").provider == "piper"
+    assert DubbingRequest(segments=[], provider="vieneu").provider == "vieneu"
     assert DubbingRequest(segments=[], provider="capcut").provider == "capcut"

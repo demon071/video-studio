@@ -79,11 +79,11 @@ class Settings(BaseSettings):
     vram_reserve_gb: float = 0.8  # headroom kept free on the GPU
 
     # --- Pipeline defaults ---
-    # stt: local | sensevoice | groq | openai | capcut | bilibili | ocr
+    # stt: local | sensevoice | capcut | ocr
     stt_provider: str = "local"
-    # translate: local | gemini | openai | google | bing
-    translate_provider: str = "local"
-    # tts: capcut | omnivoice | voicestudio
+    # translate: gemini | openai | deepseek | ollama | google | bing
+    translate_provider: str = "google"
+    # tts: capcut | elevenlabs | omnivoice | piper | vieneu
     tts_provider: str = "capcut"
     max_tempo_ratio: float = 1.35
     max_concurrent_jobs: int = 1         # serialises GPU stages
@@ -114,13 +114,8 @@ class Settings(BaseSettings):
     ocr_language: str = "auto"           # auto (Chinese hardsubs) | vi | en | ja | ko
 
     # --- Models ---
-    llm_model_file: str = "qwen2.5-3b-instruct-q4_k_m.gguf"
-    llm_context: int = 8192
-    llm_gpu_layers: int = -1             # -1 -> clamp from free VRAM
     gemini_model: str = "gemini-2.5-flash"
     openai_chat_model: str = "gpt-4.1-mini"
-    groq_stt_model: str = "whisper-large-v3-turbo"
-    openai_stt_model: str = "whisper-1"
 
     # --- TTS ---
     tts_rate: str = "+0%"
@@ -132,9 +127,10 @@ class Settings(BaseSettings):
     elevenlabs_api_key: str = ""
     elevenlabs_model: str = "eleven_turbo_v2_5"
     elevenlabs_voice: str = ""
-    # Edge TTS & Piper TTS
+    # Edge TTS, Piper TTS & VieNeu TTS
     edge_voice: str = "vi-VN-HoaiMyNeural"
     piper_voice: str = "vi_VN-vais1000-medium"
+    vieneu_voice: str = "Ngọc Huyền"
     # DeepSeek & Ollama translation providers
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
@@ -151,12 +147,6 @@ class Settings(BaseSettings):
     omnivoice_language: str = "vi"
     omnivoice_voice: str = "auto"
     omnivoice_reference_text: str = ""   # transcript of the clone sample, optional
-    # VoiceStudio (debpalash) speaks through a local OmniVoice server on its
-    # OpenAI-compatible routes; a loopback server needs no key.
-    voicestudio_base_url: str = "http://127.0.0.1:3900/v1"
-    voicestudio_model: str = "tts-1"
-    voicestudio_voice: str = "alloy"
-    voicestudio_api_key: str = ""
 
     # --- Render ---
     render_crf: int = 20
@@ -165,16 +155,12 @@ class Settings(BaseSettings):
     subtitle_font_size: int = 18
 
     # --- Online provider keys -------------------------------------------------
-    # Accepted as SVA_*_API_KEY or as the conventional unsuffixed variable
-    # (GROQ_API_KEY ...) that the providers' own SDKs look for.
-    groq_api_key: str = ""
     openai_api_key: str = ""
     gemini_api_key: str = ""
     # Overridable endpoints: a proxy, a regional host or an OpenAI-compatible
     # gateway. The Settings panel writes these, so they must exist as fields.
     gemini_base_url: str = "https://generativelanguage.googleapis.com/"
     openai_base_url: str = "https://api.openai.com/v1"
-    groq_base_url: str = "https://api.groq.com/openai/v1"
 
     @property
     def cache_path(self) -> Path:

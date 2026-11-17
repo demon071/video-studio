@@ -13,14 +13,14 @@ from app.schemas.subtitle import (
     DubbingRequest,
     DubbingResult,
 )
-from app.services import capcut_client, elevenlabs_tts, tts_service
+from app.services import capcut_client, elevenlabs_tts, piper_tts, tts_service, vieneu_tts
 
 router = APIRouter(tags=["dubbing"])
 
 
 @router.get("/api/dubbing/voices")
 def list_voices(provider: str = "capcut", search: str = "", category: str = "") -> dict:
-    """Return available TTS voices for CapCut or ElevenLabs."""
+    """Return available TTS voices for CapCut, ElevenLabs, Piper, or VieNeu."""
     if provider == "elevenlabs":
         try:
             voices = elevenlabs_tts.list_voices()
@@ -28,6 +28,10 @@ def list_voices(provider: str = "capcut", search: str = "", category: str = "") 
             return {"provider": "elevenlabs", "voices": voices, "quota": quota}
         except Exception as exc:
             return {"provider": "elevenlabs", "voices": [], "error": str(exc)}
+    if provider == "piper":
+        return {"provider": "piper", "voices": piper_tts.list_voices()}
+    if provider == "vieneu":
+        return {"provider": "vieneu", "voices": vieneu_tts.list_voices()}
     voices = capcut_client.list_capcut_voices(search=search or None, category=category or None)
     return {"provider": "capcut", "voices": voices}
 
@@ -46,6 +50,7 @@ def synthesize(request: DubbingRequest) -> DubbingResult:
             rate=request.rate,
             use_translation=request.use_translation,
             timing_rewrite=request.timing_rewrite,
+            trim_silence=request.trim_silence,
             language=request.language,
             video_path=request.video_path,
             speaker_voices=request.speaker_voices,

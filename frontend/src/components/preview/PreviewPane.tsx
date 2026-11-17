@@ -1,9 +1,11 @@
 import {
   Captions,
+  Crosshair,
   Eye,
   EyeOff,
   FileWarning,
   FlipHorizontal,
+  Image as ImageIcon,
   Loader2,
   Pause,
   Play,
@@ -19,8 +21,9 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ocrRegionTranslate, saveSettings } from "@/lib/api";
-import { formatTime } from "@/lib/format";
-import { toAssetUrl } from "@/lib/media";
+import { timelineDuration } from "@/lib/clips";
+import { clamp, formatTime } from "@/lib/format";
+import { pickImage, toAssetUrl } from "@/lib/media";
 import { player } from "@/lib/player";
 import {
   DEFAULT_REGION,
@@ -54,6 +57,7 @@ function rgba(hex: string, alpha: number): string {
 
 export function PreviewPane() {
   const source = useEditor((state) => state.source);
+  const videoClips = useEditor((state) => state.videoClips);
   const aspect = useEditor((state) => state.aspect);
   const playhead = useEditor((state) => state.playhead);
   const playing = useEditor((state) => state.playing);
@@ -90,6 +94,15 @@ export function PreviewPane() {
   // The OCR scan box, drawn on the clip itself: the schematic in Settings
   // cannot show where this clip's logo or banner actually sits.
   const [regionMode, setRegionMode] = useState(false);
+  const [drawLayerId, setDrawLayerId] = useState<string | null>(null);
+  const [logoUrls, setLogoUrls] = useState<Record<string, string>>({});
+  const [layerDrag, setLayerDrag] = useState<{
+    id: string;
+    mode: "move" | "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "draw";
+    startX: number;
+    startY: number;
+    orig: { x: number; y: number; w: number; h: number };
+  } | null>(null);
   const [draft, setDraft] = useState<Region | null>(null);
   const [frameBox, setFrameBox] = useState<FrameBox | null>(null);
   const [drawing, setDrawing] = useState(false);
@@ -102,8 +115,12 @@ export function PreviewPane() {
   const shownRegion = draft ?? storedRegion;
 
   useEffect(() => {
+    player.setClipsProvider(() => useEditor.getState().videoClips);
     player.attach(videoRef.current);
-    return () => player.attach(null);
+    return () => {
+      player.attach(null);
+      player.setClipsProvider(null);
+    };
   }, [source?.url]);
 
   // Playhead follows the media clock, never the other way round.
@@ -260,7 +277,7 @@ export function PreviewPane() {
     };
   };
 
-  const duration = source?.duration ?? 0;
+  const duration = videoClips.length ? timelineDuration(videoClips) : (source?.duration ?? 0);
   const text = (segment?.translation || segment?.text || "").trim();
   const caption =
     previewSubtitles && presentationMode !== "none" && text ? text : null;
@@ -277,22 +294,117 @@ export function PreviewPane() {
   );
   const selectedLayer = layers.find((l) => l.id === selectedLayerId) ?? null;
 
-  const handleAddVisualLayer = (kind: LayerKind) => {
+  useEffect(() => {
+    let alive = true;
+    const logoLayers = layers.filter((l) => l.kind === "logo" && l.image_path);
+    for (const l of logoLayers) {
+      if (!l.image_path || logoUrls[l.image_path]) continue;
+      void toAssetUrl(l.image_path).then((url) => {
+        if (alive && l.image_path) {
+          setLogoUrls((prev) => ({ ...prev, [l.image_path!]: url }));
+        }
+      });
+    }
+    return () => {
+      alive = false;
+    };
+  }, [layers, logoUrls]);
+
+  const handleAddVisualLayer = async (kind: LayerKind) => {
+    let imagePath: string | null = null;
+    if (kind === "logo") {
+      imagePath = await pickImage();
+    }
     const d = Math.max(duration, 5);
+    const id = `layer_${Date.now()}`;
     addLayer({
-      id: `layer_${Date.now()}`,
+      id,
       kind,
-      label: kind === "mask" ? "Khung che" : kind === "blur" ? "Làm mờ" : "Chữ nổi",
+      label:
+        kind === "mask"
+          ? "Khung che"
+          : kind === "blur"
+            ? "Làm mờ"
+            : kind === "logo"
+              ? "Logo"
+              : "Chữ nổi",
       start: 0,
       end: d,
-      x: 0.1,
-      y: kind === "text" ? 0.12 : 0.72,
-      w: 0.8,
-      h: 0.14,
+      x: kind === "logo" ? 0.72 : 0.1,
+      y: kind === "text" ? 0.12 : kind === "logo" ? 0.08 : 0.72,
+      w: kind === "logo" ? 0.2 : 0.8,
+      h: kind === "logo" ? 0.14 : 0.14,
       color: kind === "text" ? "#FFE082" : "#000000",
       opacity: kind === "mask" ? 0.85 : 1.0,
       text: kind === "text" ? "Tiêu đề / Ghi chú" : "",
       font_size: 32,
+      image_path: imagePath,
+    });
+  };
+
+  const layerPoint = (event: React.PointerEvent<HTMLElement>) => {
+    const rect = frameRef.current?.getBoundingClientRect();
+    if (!rect || !rect.width || !rect.height) return { x: 0, y: 0 };
+    return {
+      x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+      y: clamp((event.clientY - rect.top) / rect.height, 0, 1),
+    };
+  };
+
+  const applyLayerDrag = (event: React.PointerEvent<HTMLElement>) => {
+    if (!layerDrag) return;
+    const pt = layerPoint(event);
+    const dx = pt.x - layerDrag.startX;
+    const dy = pt.y - layerDrag.startY;
+    const { x, y, w, h } = layerDrag.orig;
+    const minSize = 0.04;
+
+    if (layerDrag.mode === "draw") {
+      const nx = Math.min(layerDrag.startX, pt.x);
+      const ny = Math.min(layerDrag.startY, pt.y);
+      const nw = Math.max(minSize, Math.abs(pt.x - layerDrag.startX));
+      const nh = Math.max(minSize, Math.abs(pt.y - layerDrag.startY));
+      patchLayer(layerDrag.id, {
+        x: Number(nx.toFixed(4)),
+        y: Number(ny.toFixed(4)),
+        w: Number(Math.min(1 - nx, nw).toFixed(4)),
+        h: Number(Math.min(1 - ny, nh).toFixed(4)),
+      });
+      return;
+    }
+
+    if (layerDrag.mode === "move") {
+      const nx = clamp(x + dx, 0, 1 - w);
+      const ny = clamp(y + dy, 0, 1 - h);
+      patchLayer(layerDrag.id, { x: Number(nx.toFixed(4)), y: Number(ny.toFixed(4)) });
+      return;
+    }
+
+    let nx = x;
+    let ny = y;
+    let nw = w;
+    let nh = h;
+    if (layerDrag.mode.includes("w")) {
+      const maxX = x + w - minSize;
+      nx = clamp(x + dx, 0, maxX);
+      nw = x + w - nx;
+    }
+    if (layerDrag.mode.includes("e")) {
+      nw = clamp(w + dx, minSize, 1 - x);
+    }
+    if (layerDrag.mode.includes("n")) {
+      const maxY = y + h - minSize;
+      ny = clamp(y + dy, 0, maxY);
+      nh = y + h - ny;
+    }
+    if (layerDrag.mode.includes("s")) {
+      nh = clamp(h + dy, minSize, 1 - y);
+    }
+    patchLayer(layerDrag.id, {
+      x: Number(nx.toFixed(4)),
+      y: Number(ny.toFixed(4)),
+      w: Number(nw.toFixed(4)),
+      h: Number(nh.toFixed(4)),
     });
   };
 
@@ -366,47 +478,175 @@ export function PreviewPane() {
               }}
             />
 
-            {/* Visual Layers (Mask, Blur, Text) */}
-            {activeLayers.map((layer) => (
+            {/* Visual Layers (Mask, Blur, Logo, Text) — kéo thả & chỉnh kích thước trực tiếp */}
+            {activeLayers.map((layer) => {
+              const isSelected = selectedLayerId === layer.id;
+              const handles: Array<{
+                mode: "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+                cls: string;
+              }> = [
+                { mode: "nw", cls: "-left-1 -top-1 cursor-nwse-resize" },
+                { mode: "n", cls: "left-1/2 -top-1 -translate-x-1/2 cursor-ns-resize" },
+                { mode: "ne", cls: "-right-1 -top-1 cursor-nesw-resize" },
+                { mode: "e", cls: "-right-1 top-1/2 -translate-y-1/2 cursor-ew-resize" },
+                { mode: "se", cls: "-bottom-1 -right-1 cursor-nwse-resize" },
+                { mode: "s", cls: "-bottom-1 left-1/2 -translate-x-1/2 cursor-ns-resize" },
+                { mode: "sw", cls: "-bottom-1 -left-1 cursor-nesw-resize" },
+                { mode: "w", cls: "-left-1 top-1/2 -translate-y-1/2 cursor-ew-resize" },
+              ];
+              return (
+                <div
+                  key={layer.id}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    update({ selectedLayerId: layer.id });
+                    const pt = layerPoint(e);
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    setLayerDrag({
+                      id: layer.id,
+                      mode: "move",
+                      startX: pt.x,
+                      startY: pt.y,
+                      orig: { x: layer.x, y: layer.y, w: layer.w, h: layer.h },
+                    });
+                  }}
+                  onPointerMove={(e) => {
+                    if (layerDrag?.id === layer.id) {
+                      e.stopPropagation();
+                      applyLayerDrag(e);
+                    }
+                  }}
+                  onPointerUp={(e) => {
+                    if (layerDrag?.id === layer.id) {
+                      e.stopPropagation();
+                      setLayerDrag(null);
+                    }
+                  }}
+                  onPointerCancel={() => setLayerDrag(null)}
+                  className={`absolute select-none rounded touch-none ${
+                    layerDrag?.id === layer.id ? "cursor-grabbing" : "cursor-grab"
+                  } ${isSelected ? "z-10 ring-2 ring-brand" : ""}`}
+                  style={{
+                    left: `${layer.x * 100}%`,
+                    top: `${layer.y * 100}%`,
+                    width: `${layer.w * 100}%`,
+                    height: `${layer.h * 100}%`,
+                    ...(layer.kind === "mask"
+                      ? { backgroundColor: rgba(layer.color || "#000000", layer.opacity) }
+                      : layer.kind === "blur"
+                        ? {
+                            backdropFilter: "blur(10px)",
+                            backgroundColor: "rgba(255,255,255,0.08)",
+                            border: "1px dashed rgba(255,255,255,0.45)",
+                          }
+                        : layer.kind === "logo"
+                          ? {
+                              border: isSelected ? undefined : "1px dashed rgba(52,211,153,0.5)",
+                            }
+                          : {}),
+                  }}
+                >
+                  {layer.kind === "text" && (
+                    <span
+                      className="pointer-events-none block w-full text-center font-bold"
+                      style={{
+                        color: layer.color || "#FFE082",
+                        fontSize: "clamp(11px, 3.8cqh, 28px)",
+                        textShadow: "0 2px 6px rgba(0,0,0,0.9)",
+                      }}
+                    >
+                      {layer.text}
+                    </span>
+                  )}
+                  {layer.kind === "logo" && (
+                    layer.image_path && logoUrls[layer.image_path] ? (
+                      <img
+                        src={logoUrls[layer.image_path]}
+                        alt={layer.label}
+                        className="pointer-events-none h-full w-full object-contain"
+                        draggable={false}
+                      />
+                    ) : (
+                      <div className="pointer-events-none flex h-full w-full items-center justify-center bg-emerald-500/15 text-[10px] font-medium text-emerald-200">
+                        Logo (chưa chọn ảnh)
+                      </div>
+                    )
+                  )}
+                  {isSelected &&
+                    handles.map((handle) => (
+                      <div
+                        key={handle.mode}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          const pt = layerPoint(e);
+                          e.currentTarget.setPointerCapture(e.pointerId);
+                          setLayerDrag({
+                            id: layer.id,
+                            mode: handle.mode,
+                            startX: pt.x,
+                            startY: pt.y,
+                            orig: { x: layer.x, y: layer.y, w: layer.w, h: layer.h },
+                          });
+                        }}
+                        onPointerMove={(e) => {
+                          if (layerDrag?.id === layer.id) {
+                            e.stopPropagation();
+                            applyLayerDrag(e);
+                          }
+                        }}
+                        onPointerUp={(e) => {
+                          if (layerDrag?.id === layer.id) {
+                            e.stopPropagation();
+                            setLayerDrag(null);
+                          }
+                        }}
+                        onPointerCancel={() => setLayerDrag(null)}
+                        className={`absolute h-2.5 w-2.5 rounded-sm border border-surface-0 bg-brand shadow ${handle.cls}`}
+                      />
+                    ))}
+                </div>
+              );
+            })}
+
+            {/* Draw-to-place overlay for a visual layer (like OCR region selection) */}
+            {drawLayerId && !regionMode && (
               <div
-                key={layer.id}
-                onClick={(e) => {
+                className="absolute inset-0 z-20 cursor-crosshair bg-black/25 touch-none"
+                onPointerDown={(e) => {
+                  e.preventDefault();
                   e.stopPropagation();
-                  update({ selectedLayerId: layer.id });
+                  const pt = layerPoint(e);
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  setLayerDrag({
+                    id: drawLayerId,
+                    mode: "draw",
+                    startX: pt.x,
+                    startY: pt.y,
+                    orig: { x: pt.x, y: pt.y, w: 0.04, h: 0.04 },
+                  });
                 }}
-                className={`absolute cursor-pointer rounded transition-shadow ${
-                  selectedLayerId === layer.id ? "ring-2 ring-brand" : ""
-                }`}
-                style={{
-                  left: `${layer.x * 100}%`,
-                  top: `${layer.y * 100}%`,
-                  width: `${layer.w * 100}%`,
-                  height: `${layer.h * 100}%`,
-                  ...(layer.kind === "mask"
-                    ? { backgroundColor: rgba(layer.color || "#000000", layer.opacity) }
-                    : layer.kind === "blur"
-                      ? {
-                          backdropFilter: "blur(10px)",
-                          backgroundColor: "rgba(255,255,255,0.08)",
-                          border: "1px dashed rgba(255,255,255,0.3)",
-                        }
-                      : {}),
+                onPointerMove={(e) => {
+                  if (layerDrag?.id === drawLayerId && layerDrag.mode === "draw") {
+                    e.stopPropagation();
+                    applyLayerDrag(e);
+                  }
+                }}
+                onPointerUp={() => {
+                  if (layerDrag?.id === drawLayerId) {
+                    setLayerDrag(null);
+                    setDrawLayerId(null);
+                  }
+                }}
+                onPointerCancel={() => {
+                  setLayerDrag(null);
+                  setDrawLayerId(null);
                 }}
               >
-                {layer.kind === "text" && (
-                  <span
-                    className="block w-full text-center font-bold"
-                    style={{
-                      color: layer.color || "#FFE082",
-                      fontSize: "clamp(11px, 3.8cqh, 28px)",
-                      textShadow: "0 2px 6px rgba(0,0,0,0.9)",
-                    }}
-                  >
-                    {layer.text}
-                  </span>
-                )}
+                <span className="pointer-events-none absolute inset-x-0 top-2 mx-auto w-fit rounded bg-black/75 px-2.5 py-1 text-[10px] text-slate-200">
+                  Kéo chuột trên video để vẽ vùng cho lớp phủ
+                </span>
               </div>
-            ))}
+            )}
 
             {secondaryText && (
               <div
@@ -597,24 +837,40 @@ export function PreviewPane() {
           <span className="font-semibold uppercase tracking-wider text-slate-500">Lớp phủ:</span>
           <button
             className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
-            onClick={() => handleAddVisualLayer("mask")}
+            onClick={() => void handleAddVisualLayer("mask")}
             title="Thêm khung che phụ đề gốc (Mask Box)"
           >
             <Square size={10} />+ Khung che
           </button>
           <button
             className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
-            onClick={() => handleAddVisualLayer("blur")}
+            onClick={() => void handleAddVisualLayer("blur")}
             title="Thêm vùng làm mờ phụ đề gốc / logo (Blur)"
           >
             <Sparkles size={10} />+ Làm mờ
           </button>
           <button
             className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
-            onClick={() => handleAddVisualLayer("text")}
+            onClick={() => void handleAddVisualLayer("text")}
             title="Thêm lớp chữ cố định (Text Layer)"
           >
             <Type size={10} />+ Chữ
+          </button>
+          <button
+            className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
+            onClick={() => void handleAddVisualLayer("logo")}
+            title="Thêm ảnh Logo / Watermark"
+          >
+            <ImageIcon size={10} />+ Logo
+          </button>
+          <button
+            className={`btn-ghost !px-1.5 !py-0.5 !text-[10px] ${regionMode ? "border-brand bg-brand/15 text-brand" : ""}`}
+            onClick={() => (regionMode ? exitRegion() : enterRegion())}
+            disabled={!source?.url}
+            title="Chọn vùng quét phụ đề OCR ngay trên khung hình"
+          >
+            <ScanText size={10} />
+            Vùng OCR
           </button>
           <button
             className={`btn-ghost !px-1.5 !py-0.5 !text-[10px] ${flipHorizontal ? "border-brand text-brand" : ""}`}
@@ -626,8 +882,20 @@ export function PreviewPane() {
           </button>
 
           {selectedLayer && (
-            <div className="ml-2 flex items-center gap-1.5 rounded border border-border bg-surface-1 px-2 py-0.5">
+            <div className="ml-1 flex flex-wrap items-center gap-1.5 rounded border border-border bg-surface-1 px-2 py-0.5">
               <span className="font-mono text-brand">{selectedLayer.label}</span>
+              <button
+                className={`btn-ghost !px-1.5 !py-0 !text-[10px] ${
+                  drawLayerId === selectedLayer.id ? "border-brand bg-brand/15 text-brand" : ""
+                }`}
+                onClick={() =>
+                  setDrawLayerId((prev) => (prev === selectedLayer.id ? null : selectedLayer.id))
+                }
+                title="Kéo vẽ lại vùng trên video giống chọn vùng OCR"
+              >
+                <Crosshair size={10} />
+                Kéo vẽ
+              </button>
               {selectedLayer.kind === "text" && (
                 <input
                   className="field !w-28 !px-1 !py-0 !text-[10px]"
@@ -635,26 +903,67 @@ export function PreviewPane() {
                   onChange={(e) => patchLayer(selectedLayer.id, { text: e.target.value })}
                 />
               )}
-              <label className="flex items-center gap-1 text-slate-400">
+              {selectedLayer.kind === "logo" && (
+                <button
+                  className="btn-ghost !px-1.5 !py-0 !text-[10px] text-emerald-300"
+                  onClick={async () => {
+                    const p = await pickImage();
+                    if (p) patchLayer(selectedLayer.id, { image_path: p });
+                  }}
+                >
+                  Chọn ảnh
+                </button>
+              )}
+              <label className="flex items-center gap-0.5 text-slate-400">
+                X%
+                <input
+                  type="number"
+                  min={0}
+                  max={96}
+                  className="field !w-11 !px-1 !py-0 font-mono !text-[10px]"
+                  value={Math.round(selectedLayer.x * 100)}
+                  onChange={(e) =>
+                    patchLayer(selectedLayer.id, { x: clamp(Number(e.target.value) / 100, 0, 1 - selectedLayer.w) })
+                  }
+                />
+              </label>
+              <label className="flex items-center gap-0.5 text-slate-400">
                 Y%
                 <input
                   type="number"
                   min={0}
-                  max={95}
-                  className="field !w-12 !px-1 !py-0 font-mono !text-[10px]"
+                  max={96}
+                  className="field !w-11 !px-1 !py-0 font-mono !text-[10px]"
                   value={Math.round(selectedLayer.y * 100)}
-                  onChange={(e) => patchLayer(selectedLayer.id, { y: Number(e.target.value) / 100 })}
+                  onChange={(e) =>
+                    patchLayer(selectedLayer.id, { y: clamp(Number(e.target.value) / 100, 0, 1 - selectedLayer.h) })
+                  }
                 />
               </label>
-              <label className="flex items-center gap-1 text-slate-400">
+              <label className="flex items-center gap-0.5 text-slate-400">
+                Rộng%
+                <input
+                  type="number"
+                  min={4}
+                  max={100}
+                  className="field !w-11 !px-1 !py-0 font-mono !text-[10px]"
+                  value={Math.round(selectedLayer.w * 100)}
+                  onChange={(e) =>
+                    patchLayer(selectedLayer.id, { w: clamp(Number(e.target.value) / 100, 0.04, 1 - selectedLayer.x) })
+                  }
+                />
+              </label>
+              <label className="flex items-center gap-0.5 text-slate-400">
                 Cao%
                 <input
                   type="number"
                   min={4}
-                  max={90}
-                  className="field !w-12 !px-1 !py-0 font-mono !text-[10px]"
+                  max={100}
+                  className="field !w-11 !px-1 !py-0 font-mono !text-[10px]"
                   value={Math.round(selectedLayer.h * 100)}
-                  onChange={(e) => patchLayer(selectedLayer.id, { h: Number(e.target.value) / 100 })}
+                  onChange={(e) =>
+                    patchLayer(selectedLayer.id, { h: clamp(Number(e.target.value) / 100, 0.04, 1 - selectedLayer.y) })
+                  }
                 />
               </label>
               <button
@@ -708,19 +1017,19 @@ export function PreviewPane() {
         <span className="font-mono text-[11px] text-slate-300">{formatTime(playhead)}</span>
         <span className="font-mono text-[10px] text-slate-600">/ {formatTime(duration)}</span>
 
-        <div className="mx-2 h-1 flex-1 overflow-hidden rounded bg-surface-4">
+        <div className="mx-1 h-1 min-w-[2rem] flex-1 overflow-hidden rounded bg-surface-4">
           <div
             className="h-full bg-brand/70"
             style={{ width: `${duration ? Math.min((playhead / duration) * 100, 100) : 0}%` }}
           />
         </div>
 
-        <span className="text-[10px] text-slate-500">
+        <span className="hidden truncate text-[10px] text-slate-500 xl:inline">
           {segments.length} dòng · {segments.filter((item) => item.translation?.trim()).length} đã dịch
         </span>
 
         <button
-          className={`flex items-center gap-1 rounded px-1.5 py-1 text-[10px] disabled:opacity-30 ${
+          className={`flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 py-1 text-[10px] disabled:opacity-30 ${
             regionMode ? "bg-brand/15 text-brand" : "text-slate-500 hover:text-slate-300"
           }`}
           onClick={() => (regionMode ? exitRegion() : enterRegion())}
@@ -732,7 +1041,7 @@ export function PreviewPane() {
         </button>
 
         <button
-          className={`flex items-center gap-1 rounded px-1.5 py-1 text-[10px] ${
+          className={`flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 py-1 text-[10px] ${
             previewSubtitles ? "text-brand" : "text-slate-500"
           }`}
           onClick={() => update({ previewSubtitles: !previewSubtitles })}
@@ -743,7 +1052,7 @@ export function PreviewPane() {
         </button>
 
         <button
-          className={`flex items-center gap-1 rounded px-1.5 py-1 text-[10px] disabled:opacity-30 ${
+          className={`flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 py-1 text-[10px] disabled:opacity-30 ${
             previewDub && dubUrl ? "text-emerald-400" : "text-slate-500"
           }`}
           onClick={() => update({ previewDub: !previewDub })}

@@ -106,7 +106,7 @@ export function SubtitleStylePanel() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full z-40 mt-1 w-[19rem] space-y-2.5 rounded-lg border border-border bg-surface-2 p-2.5 shadow-panel">
+        <div className="absolute right-0 top-full z-50 mt-1 max-h-[calc(100vh-12rem)] w-[19rem] space-y-2.5 overflow-y-auto rounded-lg border border-border bg-surface-2 p-2.5 shadow-panel">
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
               Kiểu phụ đề {isSecondary ? "(TS2 Song ngữ)" : "(TS1 Chính)"}

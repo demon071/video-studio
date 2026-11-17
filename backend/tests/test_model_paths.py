@@ -23,26 +23,6 @@ def _touch(path: Path) -> Path:
     return path
 
 
-def test_llm_path_follows_the_catalogue_folder(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    spec = model_manager.require("qwen2.5-3b-instruct-q4_k_m")
-    expected = _touch(model_manager.model_dir(spec, settings) / "qwen2.5-3b-instruct-q4_k_m.gguf")
-
-    assert model_manager.llm_path(settings) == expected
-    assert model_manager.status(spec, settings).downloaded
-
-
-def test_llm_path_accepts_a_hand_copied_file(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    flat = _touch(settings.models_path / "llm" / settings.llm_model_file)
-
-    assert model_manager.llm_path(settings) == flat
-
-
-def test_llm_path_is_none_when_absent(tmp_path: Path) -> None:
-    assert model_manager.llm_path(_settings(tmp_path)) is None
-
-
 def test_the_omnivoice_entry_has_no_weights_to_download(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     spec = model_manager.require("omnivoice-v1")

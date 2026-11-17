@@ -23,10 +23,12 @@ import type {
   ProviderTestBody,
   ProviderTestResult,
   QualityProfile,
+  QueuePreviewResult,
   QueueSnapshot,
   RenderResult,
   SettingsDocument,
   SettingsPatchBody,
+  SttProvider,
   SubtitlePresentationMode,
   SubtitleSegment,
   SubtitleStyle,
@@ -251,6 +253,20 @@ export async function probeVideo(videoPath: string): Promise<ProbeResult> {
   }
 }
 
+export async function cutTimelineVideo(body: {
+  video_path: string;
+  mode: "trim_left" | "trim_right" | "delete_range";
+  start?: number;
+  end?: number;
+}): Promise<{ output_path: string; duration: number }> {
+  try {
+    const { data } = await api.post<{ output_path: string; duration: number }>(ENDPOINTS.mediaCut, body, long);
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
 export interface TranscribeBody {
   video_path: string;
   language?: string;
@@ -264,12 +280,6 @@ export interface TranscribeBody {
    * CapCap's trick for clips whose soundtrack drowns the dialogue.
    */
   audio_mode?: AudioMode | null;
-  /**
-   * Read the burned-in subtitles inside every stretch that carries sound but
-   * produced no line. Runs after the speech pass, so it never touches the
-   * lines the engine already found.
-   */
-  ocr_fill?: boolean;
   dedup_enabled?: boolean;
   dedup_similarity?: number;
   hallucination_filter_enabled?: boolean;
@@ -494,6 +504,7 @@ export interface RenderBody {
   use_nvenc?: boolean;
   flip_horizontal?: boolean;
   layers?: VisualLayer[];
+  video_clips?: Array<{ source_start: number; source_end: number }>;
   start_time?: number | null;
   sample_duration?: number | null;
 }
@@ -543,6 +554,27 @@ export async function runMediaTrim(body: {
   try {
     const { data } = await api.post(ENDPOINTS.mediaTrim, body, long);
     return data as { output_path: string };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function runMediaBatchTrim(body: {
+  video_paths?: string[];
+  input_dir?: string | null;
+  output_dir: string;
+  mode: "head_tail" | "range" | "split_duration" | "split_ranges";
+  trim_head?: number;
+  trim_tail?: number;
+  start?: number;
+  end?: number;
+  chunk_duration?: number;
+  ranges?: Array<[number, number]>;
+  reencode?: boolean;
+}): Promise<{ outputs: string[]; count: number; skipped: string[] }> {
+  try {
+    const { data } = await api.post(ENDPOINTS.mediaBatchTrim, body, long);
+    return data as { outputs: string[]; count: number; skipped: string[] };
   } catch (error) {
     return fail(error);
   }
@@ -601,6 +633,7 @@ export async function fetchQueue(): Promise<QueueSnapshot> {
 export async function addQueueItems(body: {
   video_paths: string[];
   source_mode?: "audio" | "ocr" | "auto";
+  stt_provider?: SttProvider;
   target_language?: string;
   translate_provider?: string;
   translate_preset?: string;
@@ -610,6 +643,15 @@ export async function addQueueItems(body: {
 }): Promise<QueueSnapshot> {
   try {
     const { data } = await api.post<QueueSnapshot>(ENDPOINTS.queueAdd, body);
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function fetchQueuePreview(itemId: string): Promise<QueuePreviewResult> {
+  try {
+    const { data } = await api.get<QueuePreviewResult>(`${ENDPOINTS.queue}/${encodeURIComponent(itemId)}/preview`);
     return data;
   } catch (error) {
     return fail(error);

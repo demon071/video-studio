@@ -28,12 +28,10 @@ def _hex(value: str) -> str:
 
 class Provider(StrEnum):
     LOCAL = "local"
-    GROQ = "groq"
     OPENAI = "openai"
     GEMINI = "gemini"
-    # Speech-to-text providers that need no key.
+    # Speech-to-text providers (CapCap): local (Whisper), capcut, ocr, sensevoice.
     CAPCUT = "capcut"
-    BILIBILI = "bilibili"
     OCR = "ocr"
     # Offline CPU recogniser for Chinese / English / Japanese / Korean / Cantonese.
     SENSEVOICE = "sensevoice"
@@ -89,7 +87,7 @@ class TranscribeRequest(BaseModel):
     video_path: str = Field(description="Absolute Windows path of the source clip")
     language: str = "auto"
     provider: Literal[
-        "local", "groq", "openai", "capcut", "bilibili", "ocr", "sensevoice"
+        "local", "capcut", "ocr", "sensevoice"
     ] | None = None
     model: str | None = Field(default=None, description="Override the whisper size")
     vad: bool = True
@@ -107,14 +105,6 @@ class TranscribeRequest(BaseModel):
             "fast = transcribe the mix; clean = separate the vocal first "
             "(better lines when music or effects cover the speech). "
             "None uses the mode saved in Settings."
-        ),
-    )
-    ocr_fill: bool = Field(
-        default=False,
-        description=(
-            "After the speech pass, read the burned-in subtitles inside every stretch that "
-            "carries sound but produced no line. Uses the OCR settings; a missing engine "
-            "leaves the audio result untouched."
         ),
     )
     # CapCap ASR cleanup & speaker diarization options
@@ -165,17 +155,13 @@ class TranscribeResult(BaseModel):
     provider: str
     model: str
     device: str
-    ocr_filled: int = Field(
-        default=0,
-        description="Lines the OCR pass added on stretches the speech engine left empty",
-    )
 
 
 class TranslateRequest(BaseModel):
     segments: list[SubtitleSegment]
     target_language: str = "vi"
     source_language: str = "auto"
-    provider: Literal["local", "gemini", "openai", "deepseek", "ollama", "browser", "google", "bing"] | None = None
+    provider: Literal["gemini", "openai", "deepseek", "ollama", "browser", "google", "bing"] | None = None
     style: str = Field(default="short-form video subtitle", description="Tone hint or genre preset for the LLM")
     preset: str | None = Field(default=None, description="CapCap genre preset key (e.g. zh_short_drama)")
     custom_prompt: str | None = Field(default=None, description="Custom system/style prompt override")
@@ -195,7 +181,7 @@ class ContextAnalyzeRequest(BaseModel):
     segments: list[SubtitleSegment]
     source_language: str = "auto"
     target_language: str = "vi"
-    provider: Literal["local", "gemini", "openai", "deepseek", "ollama"] | None = None
+    provider: Literal["gemini", "openai", "deepseek", "ollama"] | None = None
     user_guidance: str = Field(
         default="",
         description="User feedback to revise character roles/genders/pronouns (e.g. 'Đảo ngược 2 nhân vật A và B')",
@@ -307,7 +293,7 @@ class DubbingSegmentReport(BaseModel):
     )
 
 
-DubbingProvider = Literal["capcut", "omnivoice", "voicestudio", "elevenlabs"]
+DubbingProvider = Literal["capcut", "omnivoice", "elevenlabs", "piper", "vieneu"]
 
 
 class DubbingRequest(BaseModel):
@@ -444,13 +430,14 @@ class VisualLayer(BaseModel):
 
     id: str
     kind: Literal["blur", "mask", "logo", "text"]
+    label: str = ""
     start: float = Field(default=0.0, ge=0.0)
-    end: float = Field(default=5.0, gt=0.0)
-    # Normalized rectangle [x, y, width, height] in percent (0..100) of the frame.
-    x: float = Field(default=5.0, ge=0.0, le=100.0)
-    y: float = Field(default=70.0, ge=0.0, le=100.0)
-    width: float = Field(default=90.0, gt=0.0, le=100.0)
-    height: float = Field(default=18.0, gt=0.0, le=100.0)
+    end: float = Field(default=5.0, ge=0.0)
+    # Normalized rectangle [x, y, w, h] in 0..1 (or percent 0..100 for legacy callers).
+    x: float = Field(default=0.05, ge=0.0, le=100.0)
+    y: float = Field(default=0.70, ge=0.0, le=100.0)
+    w: float = Field(default=0.90, gt=0.0, le=100.0)
+    h: float = Field(default=0.18, gt=0.0, le=100.0)
     opacity: float = Field(default=1.0, ge=0.0, le=1.0)
     # Kind-specific parameters
     blur_strength: int = Field(default=24, ge=2, le=100)
@@ -460,6 +447,11 @@ class VisualLayer(BaseModel):
     image_path: str | None = None
     locked: bool = False
     visible: bool = True
+
+
+class VideoClipRange(BaseModel):
+    source_start: float = Field(ge=0.0)
+    source_end: float = Field(gt=0.0)
 
 
 class RenderRequest(BaseModel):
@@ -489,8 +481,8 @@ class RenderRequest(BaseModel):
     )
     crf: int = 20
     preset: str = "medium"
-    quality_profile: Literal["balanced", "low"] | None = Field(
-        default=None, description="CapCap compression profile: balanced (CRF 22 / CQ 25) or low (CRF 26 / CQ 28)"
+    quality_profile: Literal["high", "balanced", "low"] | None = Field(
+        default=None, description="CapCap compression profile: high (CRF 20), balanced (CRF 22 / CQ 25), or low (CRF 26 / CQ 28)"
     )
     use_nvenc: bool = Field(
         default=True, description="Prefer NVIDIA NVENC GPU encoding with automatic CPU fallback"
@@ -500,6 +492,9 @@ class RenderRequest(BaseModel):
     )
     layers: list[VisualLayer] = Field(
         default_factory=list, description="Timed Blur, Mask, Logo, and Text visual layers"
+    )
+    video_clips: list[VideoClipRange] = Field(
+        default_factory=list, description="Non-destructive timeline clip ranges to trim/concat on export"
     )
     start_time: float | None = Field(
         default=None, ge=0.0, description="Optional start offset (used by Fast Preview 5s)"

@@ -20,6 +20,7 @@ import type {
   SubtitleStyle,
   TranslateProvider,
   TtsProvider,
+  VideoClip,
   VisualLayer,
 } from "@/types/editor";
 
@@ -132,12 +133,6 @@ interface EditorState {
   settings: SettingsDocument | null;
   /** Mirror of `settings.audio.mode` so `runTranscribe` can send it. */
   audioMode: AudioMode;
-  /**
-   * Read the picture again on every stretch that carries sound but produced no
-   * line (the reference project's hole pass, answered by OCR instead of a
-   * second listen). Engine-wide habit, not part of the project document.
-   */
-  ocrFill: boolean;
   /** Optional heavy-engine add-on: what is installed and what is running. */
   aiPack: AiPackStatus | null;
   socket: SocketState;
@@ -188,6 +183,14 @@ interface EditorState {
   qualityProfile: QualityProfile;
   useNvenc: boolean;
   selectionRange: [number, number] | null;
+  videoClips: VideoClip[];
+  selectedClipId: string | null;
+  cutUndoStack: Array<{
+    videoClips: VideoClip[];
+    segments: SubtitleSegment[];
+    secondarySegments: SubtitleSegment[];
+    layers: VisualLayer[];
+  }>;
   // actions
   update: (patch: Partial<EditorState>) => void;
   setSource: (source: SourceClip | null) => void;
@@ -239,7 +242,6 @@ const TRANSIENT_KEYS = new Set<string>([
   "modelsPath",
   "settings",
   "audioMode",
-  "ocrFill",
   "aiPack",
   "socket",
   "job",
@@ -257,7 +259,8 @@ const DEFAULT_VOICES: Record<TtsProvider, string> = {
   elevenlabs: "21m00Tcm4TlvDq8ikWAM",
   // OmniVoice: `auto` lets the model pick; a description or `clone:<wav>` also work.
   omnivoice: "auto",
-  voicestudio: "alloy",
+  piper: "vi_VN-vais1000-medium",
+  vieneu: "Ngọc Huyền",
 };
 
 const DEFAULT_SECONDARY_STYLE: SubtitleStyle = {
@@ -317,9 +320,6 @@ export const useEditor = create<EditorState>((set, get) => ({
   modelsPath: "",
   settings: null,
   audioMode: "fast",
-  // On by default: it costs nothing when the pass finds no hole, and a clip
-  // with burned-in subtitles is exactly the case the audio pass loses lines in.
-  ocrFill: true,
   aiPack: null,
   socket: "connecting",
   job: null,
@@ -329,7 +329,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   whisperSize: "medium",
   sourceLanguage: "auto",
   targetLanguage: "vi",
-  translateProvider: "local",
+  translateProvider: "google",
   translateStyle: "short-form video subtitle, natural spoken Vietnamese",
   useTranslationForDub: true,
   ttsProvider: "capcut",
@@ -363,6 +363,9 @@ export const useEditor = create<EditorState>((set, get) => ({
   qualityProfile: "high",
   useNvenc: false,
   selectionRange: null,
+  videoClips: [],
+  selectedClipId: null,
+  cutUndoStack: [],
 
   update: (patch) =>
     set(() => {
@@ -374,6 +377,11 @@ export const useEditor = create<EditorState>((set, get) => ({
   setSource: (source) =>
     set({
       source,
+      videoClips: source
+        ? [{ id: "clip_0", name: source.name, source_start: 0, source_end: source.duration }]
+        : [],
+      selectedClipId: null,
+      cutUndoStack: [],
       segments: [],
       selected: null,
       dub: null,

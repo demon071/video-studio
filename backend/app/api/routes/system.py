@@ -56,9 +56,6 @@ def hardware_report() -> dict[str, Any]:
         "preset": profile.preset,
         "device": "cuda" if profile.has_cuda else "cpu",
         "whisper": {"model": profile.whisper_model, "compute_type": profile.whisper_compute_type},
-        # The GGUF the translator would load now, not the engine default: the
-        # offline model is a choice in providers.json.
-        "llm": {"model": provider_config.overlay(settings).llm_model_file, "gpu_layers": profile.llm_gpu_layers},
         "tts": {"provider": settings.tts_provider, "voice": _tts_voice(settings)},
         "paths": {
             "data": str(folders["root"]),
@@ -69,7 +66,6 @@ def hardware_report() -> dict[str, Any]:
         "ffmpeg": str(ffmpeg) if ffmpeg else None,
         "ffprobe": str(ffprobe) if ffprobe else None,
         "api_keys": {
-            "groq": bool(settings.groq_api_key or ""),
             "openai": bool(settings.openai_api_key or ""),
             "gemini": bool(settings.gemini_api_key or ""),
         },
