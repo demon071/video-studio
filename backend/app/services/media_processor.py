@@ -332,6 +332,10 @@ def separate_vocals(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     settings = settings or get_settings()
+    ffmpeg_dir = str(Path(resolve_ffmpeg()).parent)
+    if ffmpeg_dir and ffmpeg_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = f"{ffmpeg_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
     # audio-separator looks for the .onnx directly inside model_file_dir and
     # downloads it again otherwise, so point at the managed sub-folder.
     managed = model_manager.model_dir(model_manager.require("uvr-mdx-inst-hq3"), settings)
@@ -349,7 +353,13 @@ def separate_vocals(
         except Exception:  # noqa: BLE001 - older API builds
             log.debug("could not set CUDA provider for separator")
 
-    stems = separator.separate(str(audio_path))
+    src_path = Path(audio_path)
+    if src_path.suffix.lower() not in {".wav", ".flac", ".ogg"}:
+        extracted = output_dir / "source_audio.wav"
+        extract_audio(src_path, extracted, sample_rate=44_100, mono=False)
+        src_path = extracted
+
+    stems = separator.separate(str(src_path))
     vocals_path = instrumental_path = None
     for stem in stems:
         stem_path = output_dir / Path(stem).name

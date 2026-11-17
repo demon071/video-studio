@@ -19,6 +19,7 @@ export const API_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS ?? 30_0
 export const ENDPOINTS = {
   health: "/api/health",
   hardware: "/api/system/hardware",
+  openPath: "/api/system/open-path",
   models: "/api/models",
   model: (key: string) => `/api/models/${encodeURIComponent(key)}`,
   modelDownload: (key: string) => `/api/models/${encodeURIComponent(key)}/download`,
@@ -30,6 +31,7 @@ export const ENDPOINTS = {
   probe: "/api/media/probe",
   thumbnail: "/api/media/thumbnail",
   mediaCut: "/api/media/cut",
+  mediaStripBgm: "/api/media/strip-bgm",
   mediaTrim: "/api/media/tools/trim",
   mediaBatchTrim: "/api/media/tools/batch-trim",
   mediaConcat: "/api/media/tools/concat",

@@ -64,7 +64,11 @@ DEVICES = ("auto", "gpu", "cpu")
 # "tiny" shrinks only the detector and keeps the stronger recogniser: halving
 # the recogniser costs accuracy on diacritics, which is exactly what a
 # Vietnamese subtitle cannot afford.
-PROFILE_MODELS = {"small": ("SMALL", "SMALL"), "tiny": ("TINY", "SMALL")}
+PROFILE_MODELS = {
+    "small": ("SMALL", "SMALL"),
+    "tiny": ("TINY", "SMALL"),
+    "medium": ("MEDIUM", "MEDIUM"),
+}
 # PP-OCRv6 dropped Korean; that language stays on the v5 mobile pair instead of
 # silently falling back to another engine.
 _V5_LANGS = frozenset({"korean"})
@@ -75,7 +79,7 @@ DEFAULT_FPS = 3.0
 # few percent above that: a band that starts at 66% clips the diacritics off
 # the first line ("thể" reads as "th"), so the scan starts at 55% instead.
 DEFAULT_BAND = 0.45
-MIN_CONFIDENCE = 0.55
+MIN_CONFIDENCE = 0.60
 # Two samples of the same cue must overlap this much to be the same line.
 # Not 1.0: one dropped diacritic ("chao" for "chào") is 0.86, and that is the
 # same line, while a following cue is nothing like this one.
@@ -723,6 +727,25 @@ def _rapidocr_params(
         }
         return params
 
+    if profile == "server":
+        params |= {
+            "Det.ocr_version": OCRVersion.PPOCRV5,
+            "Det.lang_type": "multi",
+            "Det.model_type": ModelType.SERVER,
+        }
+        if wanted == "ch":
+            params |= {
+                "Rec.ocr_version": OCRVersion.PPOCRV5,
+                "Rec.lang_type": "ch",
+                "Rec.model_type": ModelType.SERVER,
+            }
+        else:
+            params |= {
+                "Rec.lang_type": wanted,
+                "Rec.model_type": ModelType.MEDIUM,
+            }
+        return params
+
     detector, recogniser = PROFILE_MODELS.get(profile, PROFILE_MODELS["small"])
     if detector == "TINY" and wanted in _DET_WITHOUT_TINY:
         detector = "SMALL"
@@ -1040,15 +1063,16 @@ class _Run:
     start: float
     last: float
     count: int
-    text: str
+    readings: list[str]
+
+    @property
+    def text(self) -> str:
+        return _pick(self.readings)
 
     def extend(self, when: float, text: str) -> None:
         self.last = when
         self.count += 1
-        # Subtitles are wrapped onto two lines, and the OCR of one frame
-        # occasionally loses the second: keep the most complete reading.
-        if len(text) > len(self.text):
-            self.text = text
+        self.readings.append(text)
 
 
 def merge_observations(
@@ -1073,14 +1097,27 @@ def merge_observations(
             continue
         if current is not None:
             runs.append(current)
-        current = _Run(start=when, last=when, count=1, text=text)
+        current = _Run(start=when, last=when, count=1, readings=[text])
     if current is not None:
         runs.append(current)
 
+    kept_runs = [run for run in runs if run.count >= min_frames]
+    merged_runs: list[_Run] = []
+    for run in kept_runs:
+        if (
+            merged_runs
+            and run.start - merged_runs[-1].last <= step + grace + 0.35
+            and _similar(merged_runs[-1].text, run.text) >= similarity
+        ):
+            prev = merged_runs[-1]
+            prev.last = run.last
+            prev.count += run.count
+            prev.readings.extend(run.readings)
+        else:
+            merged_runs.append(run)
+
     cues: list[tuple[float, float, str]] = []
-    for run in runs:
-        if run.count < min_frames:
-            continue
+    for run in merged_runs:
         start = max(run.start - step / 2, 0.0)
         end = run.last + step / 2
         cues.append((round(start, 3), round(end, 3), run.text))

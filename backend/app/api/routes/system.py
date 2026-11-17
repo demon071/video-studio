@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app import APP_VERSION
 from app.config import Settings, ensure_data_dirs, get_settings, resolve_ffmpeg, resolve_ffprobe
@@ -70,6 +75,44 @@ def hardware_report() -> dict[str, Any]:
             "gemini": bool(settings.gemini_api_key or ""),
         },
     }
+
+
+class OpenPathRequest(BaseModel):
+    path: str
+    action: Literal["open", "reveal"] = "open"
+
+
+@router.post("/api/system/open-path")
+def open_system_path(body: OpenPathRequest) -> dict[str, Any]:
+    """Open a rendered file in the default player or reveal it in the file manager."""
+    raw = (body.path or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Đường dẫn trống.")
+    target = Path(raw).expanduser().resolve()
+    if not target.exists():
+        # Fall back to parent folder when the file itself was moved/deleted.
+        parent = target.parent
+        if body.action == "reveal" and parent.is_dir():
+            target = parent
+        else:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy tệp hoặc thư mục: {target}")
+
+    try:
+        if sys.platform == "win32":
+            if body.action == "reveal" and target.is_file():
+                subprocess.Popen(["explorer", "/select,", str(target)])
+            else:
+                os.startfile(str(target if body.action == "open" or target.is_dir() else target.parent))
+        elif sys.platform == "darwin":
+            cmd = ["open", "-R", str(target)] if body.action == "reveal" and target.is_file() else ["open", str(target)]
+            subprocess.Popen(cmd)
+        else:
+            dest = target if (body.action == "open" or target.is_dir()) else target.parent
+            subprocess.Popen(["xdg-open", str(dest)])
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Không thể mở đường dẫn: {exc}") from exc
+
+    return {"ok": True, "path": str(target), "action": body.action}
 
 
 __all__ = ["STARTED_AT", "router"]

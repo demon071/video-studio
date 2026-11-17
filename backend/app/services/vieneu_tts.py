@@ -13,9 +13,6 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import soundfile as sf
-
 from app.config import Settings, get_settings
 
 log = logging.getLogger(__name__)
@@ -105,6 +102,118 @@ def _load_model(settings: Settings) -> Any:
         return _MODEL
 
 
+def _prepare_text(text: str) -> str:
+    cleaned = " ".join(str(text or "").replace("\n", " ").split()).strip()
+    if cleaned and cleaned[-1] not in ".!?,;:…":
+        cleaned = f"{cleaned}."
+    return cleaned
+
+
+def _to_mono_float32(audio_data: Any) -> Any:
+    import numpy as np
+
+    arr = np.asarray(audio_data, dtype=np.float32)
+    if arr.ndim > 1:
+        arr = np.mean(arr, axis=1)
+    return arr.reshape(-1)
+
+
+def _find_speech_bursts(wav: Any, sr: int) -> list[tuple[int, int]]:
+    """Return ``(start_ms, end_ms)`` speech islands separated by silence gaps."""
+    import numpy as np
+    from vieneu_utils.core_utils import _BURST_MIN_GAP_MS, _BURST_MIN_MS, _BURST_THRESH_DB
+
+    hop = max(1, int(sr * 0.010))
+    n = len(wav) // hop
+    if n == 0:
+        return []
+    env = np.sqrt((wav[: n * hop].reshape(n, hop) ** 2).mean(axis=1))
+    peak = float(env.max())
+    if peak <= 1e-6:
+        return []
+    on = env > peak * (10 ** (_BURST_THRESH_DB / 20))
+    min_gap = max(1, _BURST_MIN_GAP_MS // 10)
+    min_len = max(1, _BURST_MIN_MS // 10)
+    bursts: list[tuple[int, int]] = []
+    start: int | None = None
+    last_on: int | None = None
+    for i, active in enumerate(on):
+        if active:
+            if start is None:
+                start = i
+            elif last_on is not None and i - last_on > min_gap:
+                bursts.append((start, last_on))
+                start = i
+            last_on = i
+    if start is not None and last_on is not None:
+        bursts.append((start, last_on))
+    return [(a * 10, (b + 1) * 10) for a, b in bursts if (b - a + 1) >= min_len]
+
+
+def _trim_repeated_tail(wav: Any, sr: int, bursts: list[tuple[int, int]], syllables: int) -> Any:
+    """Trim duplicated trailing utterance at the silence gap after the first reading."""
+    import numpy as np
+
+    if len(bursts) < 2:
+        return wav
+    first_dur_ms = bursts[0][1] - bursts[0][0]
+    if syllables <= 1 or first_dur_ms >= 220:
+        end_ms, next_ms = bursts[0][1], bursts[1][0]
+    elif len(bursts) >= 3:
+        end_ms, next_ms = bursts[1][1], bursts[2][0]
+    else:
+        return wav
+
+    cut_ms = min((end_ms + next_ms) // 2, end_ms + 80)
+    cut_idx = min(len(wav), max(1, int(cut_ms * sr / 1000)))
+    if cut_idx >= len(wav):
+        return wav
+    trimmed = wav[:cut_idx].copy()
+    fade = min(len(trimmed), int(sr * 0.020))
+    if fade > 0:
+        trimmed[-fade:] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
+    return trimmed
+
+
+def _infer_clean(model: Any, spoken: str, infer_kwargs: dict[str, Any], sr: int) -> Any:
+    """Run ``model.infer`` and guard short chunks against autoregressive double-reading."""
+    arr = _to_mono_float32(model.infer(spoken, **infer_kwargs))
+    try:
+        from vieneu_utils.core_utils import babble_prefer, babble_suspect, max_expected_frames
+        from vieneu_utils.phonemize_text import phonemize_text_with_emotions
+    except ImportError:
+        return arr
+
+    phonemes = phonemize_text_with_emotions(spoken)
+    cap_frames = min(300, max_expected_frames(phonemes))
+    best = babble_suspect(arr, sr, phonemes, cap_frames)
+    if not best[0]:
+        return arr
+
+    for alt_temp in (0.75, 0.5):
+        cand_opts = {**infer_kwargs, "temperature": alt_temp}
+        cand_wav = _to_mono_float32(model.infer(spoken, **cand_opts))
+        cand = babble_suspect(cand_wav, sr, phonemes, cap_frames)
+        if babble_prefer(cand, best):
+            arr, best = cand_wav, cand
+        if not best[0]:
+            return arr
+
+    bursts = _find_speech_bursts(arr, sr)
+    if len(bursts) >= 2:
+        trimmed = _trim_repeated_tail(arr, sr, bursts, best[1])
+        if len(trimmed) < len(arr):
+            log.info(
+                "VieNeu trimmed repeated short-chunk tail: '%s' %.2fs -> %.2fs (bursts=%s)",
+                spoken,
+                len(arr) / sr,
+                len(trimmed) / sr,
+                bursts,
+            )
+            return trimmed
+    return arr
+
+
 def synthesize(
     text: str,
     output_path: str | Path,
@@ -116,26 +225,40 @@ def synthesize(
     settings = settings or get_settings()
     chosen = resolve_voice(voice, settings)
     model = _load_model(settings)
+    spoken = _prepare_text(text)
+    if not spoken:
+        raise VieNeuError("Nội dung câu cần đọc bị trống.")
 
+    try:
+        import numpy as np  # noqa: F401
+        import soundfile as sf
+    except ImportError as exc:
+        raise VieNeuError("VieNeu-TTS chưa có numpy/soundfile (cần gói AI).") from exc
+
+    sr = int(getattr(model, "sample_rate", SAMPLE_RATE))
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_suffix(".part.wav")
 
+    infer_kwargs: dict[str, Any] = {
+        "temperature": 0.6,
+        "top_k": 20,
+        "repetition_penalty": 1.35,
+        "apply_watermark": False,
+    }
     if chosen.lower().startswith("clone:"):
         ref_path = Path(chosen.split(":", 1)[1].strip())
         if not ref_path.is_file():
             raise VieNeuError(f"Không tìm thấy file giọng mẫu để clone: {ref_path}")
-        audio_data = model.infer(text.strip(), ref_audio=str(ref_path), ref_text="")
+        infer_kwargs["ref_audio"] = str(ref_path)
+        infer_kwargs["ref_text"] = ""
     else:
-        preset = chosen if chosen in VIENEU_PRESET_VOICES else DEFAULT_VOICE
-        audio_data = model.infer(text.strip(), voice=preset)
+        infer_kwargs["voice"] = chosen if chosen in VIENEU_PRESET_VOICES else DEFAULT_VOICE
 
-    arr = np.asarray(audio_data, dtype=np.float32)
-    if arr.ndim > 1:
-        arr = np.mean(arr, axis=1)
+    arr = _infer_clean(model, spoken, infer_kwargs, sr)
 
     try:
-        sf.write(str(part), arr, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+        sf.write(str(part), arr, sr, format="WAV", subtype="PCM_16")
         if not part.is_file() or part.stat().st_size <= 44:
             raise VieNeuError("VieNeu-TTS không tạo được âm thanh hợp lệ.")
         os.replace(part, target)

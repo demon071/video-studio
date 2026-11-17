@@ -13,8 +13,8 @@ import { useEffect, useState } from "react";
 
 import { clipTimelineBounds, timelineDuration } from "@/lib/clips";
 import { clamp, formatTime } from "@/lib/format";
-import { pickImage } from "@/lib/media";
-import { deleteTimelineClip, splitTimelineClip } from "@/lib/tasks";
+import { pickAudio, pickImage } from "@/lib/media";
+import { deleteTimelineClip, runStripBgm, splitTimelineClip } from "@/lib/tasks";
 import { useEditor } from "@/store/editorStore";
 import type { Aspect, LayerKind, QualityProfile } from "@/types/editor";
 
@@ -38,9 +38,11 @@ export function PropertiesPanel() {
   const keepOriginalAudio = useEditor((state) => state.keepOriginalAudio);
   const duckGain = useEditor((state) => state.duckGain);
   const voiceGain = useEditor((state) => state.voiceGain);
+  const backgroundAudioPath = useEditor((state) => state.backgroundAudioPath);
   const previewDub = useEditor((state) => state.previewDub);
   const trimSilence = useEditor((state) => state.trimSilence);
   const dub = useEditor((state) => state.dub);
+  const pending = useEditor((state) => state.pending);
   const update = useEditor((state) => state.update);
 
   const [section, setSection] = useState<InspectorSection>("video");
@@ -535,6 +537,47 @@ export function PropertiesPanel() {
                 onChange={(e) => update({ trimSilence: e.target.checked })}
               />
             </label>
+
+            <div className="space-y-1.5 border-t border-border pt-2">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-300/90">
+                Chống bản quyền nhạc nền
+              </div>
+              <div className="flex gap-1.5">
+                <button
+                  className="btn-ghost flex-1 !py-1 !text-[10px]"
+                  disabled={!source?.path || Boolean(pending.stripBgm)}
+                  onClick={() => void runStripBgm()}
+                  title="Dùng AI UVR-MDX tách bỏ nhạc nền bản quyền khỏi âm thanh gốc"
+                >
+                  <Sparkles size={10} />
+                  {pending.stripBgm ? "Đang tách nhạc…" : "Xóa nhạc nền gốc (AI)"}
+                </button>
+                <button
+                  className="btn-ghost flex-1 !py-1 !text-[10px] text-emerald-300"
+                  onClick={async () => {
+                    const p = await pickAudio();
+                    if (p) update({ backgroundAudioPath: p });
+                  }}
+                  title="Chọn file nhạc nền không bản quyền trộn dưới giọng lồng tiếng"
+                >
+                  Chọn nhạc nền…
+                </button>
+              </div>
+              {backgroundAudioPath && (
+                <div className="flex items-center justify-between gap-2 rounded bg-surface-1 px-2 py-1 font-mono text-[10px] text-emerald-300">
+                  <span className="truncate" title={backgroundAudioPath}>
+                    {backgroundAudioPath}
+                  </span>
+                  <button
+                    className="shrink-0 text-slate-400 hover:text-rose-400"
+                    onClick={() => update({ backgroundAudioPath: null })}
+                    title="Bỏ nhạc nền thay thế"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+            </div>
 
             {dub && (
               <div className="rounded border border-border bg-surface-1 p-2 text-[10px] text-slate-400">

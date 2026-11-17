@@ -191,7 +191,7 @@ _SLOT_ENV_ALIASES = {
 
 # OCR engine names the UI may pick (CapCap: rapidocr and Windows Media OCR).
 OCR_ENGINES = ("rapidocr", "winocr")
-OCR_PROFILES = ("small", "tiny")
+OCR_PROFILES = ("small", "tiny", "medium", "server")
 # Where the frame reader runs: auto = GPU when the ONNX build has one, CPU
 # otherwise. Reading frames is the slow half of OCR, so the default now tries
 # the GPU; "gpu" is a preference, never a hard requirement (a job must not fail
@@ -512,8 +512,12 @@ def _describe_ocr(settings: Settings, document: dict[str, Any]) -> dict[str, Any
     folder = ocr_service.model_root(settings)
     try:
         tiny_installed = any(folder.glob("*det_tiny*.onnx"))
+        medium_installed = any(folder.glob("*det_medium*.onnx")) and any(folder.glob("*rec_medium*.onnx"))
+        server_installed = any(folder.glob("*det_server*.onnx"))
     except OSError:
         tiny_installed = False
+        medium_installed = False
+        server_installed = False
     region = resolved_region(settings.model_copy(update={"ocr_region": document["ocr"]["region"]}))
     device = document["ocr"]["device"] or (settings.ocr_device or "auto")
     return {
@@ -557,6 +561,24 @@ def _describe_ocr(settings: Settings, document: dict[str, Any]) -> dict[str, Any
                     "bản small nên dấu tiếng Việt vẫn đủ."
                 ),
                 "installed": tiny_installed,
+            },
+            {
+                "name": "medium",
+                "label": "PP-OCRv6 Medium — Chính xác cao",
+                "speed": "Trung bình",
+                "detector": "det medium (v6)",
+                "recognizer": "rec medium (v6)",
+                "note": "Model lớn hơn bản Small, đọc chính xác hơn chữ mờ, viền mỏng hoặc font cách điệu (đa ngôn ngữ). Tự tải ở lần chạy đầu.",
+                "installed": medium_installed,
+            },
+            {
+                "name": "server",
+                "label": "PP-OCRv5 Server — Chính xác nhất (Trung/Anh)",
+                "speed": "Chậm hơn",
+                "detector": "det server (v5)",
+                "recognizer": "rec server (v5) / medium",
+                "note": "Bản Server độ chính xác cao nhất cho phụ đề tiếng Trung / Anh-Trung (tự tải ở lần chạy đầu; chạy nhanh nhất khi bật GPU).",
+                "installed": server_installed,
             },
         ],
         "model_dir": str(folder),

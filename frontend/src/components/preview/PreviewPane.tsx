@@ -78,6 +78,7 @@ export function PreviewPane() {
   const previewDub = useEditor((state) => state.previewDub);
   const keepOriginalAudio = useEditor((state) => state.keepOriginalAudio);
   const duckGain = useEditor((state) => state.duckGain);
+  const backgroundAudioPath = useEditor((state) => state.backgroundAudioPath);
   const update = useEditor((state) => state.update);
   const segment = useEditor(selectActiveSegment);
   const dubPath = useEditor((state) => state.dub?.track_path);
@@ -88,8 +89,10 @@ export function PreviewPane() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const bgAudioRef = useRef<HTMLAudioElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const [dubUrl, setDubUrl] = useState<string | null>(null);
+  const [bgUrl, setBgUrl] = useState<string | null>(null);
 
   // The OCR scan box, drawn on the clip itself: the schematic in Settings
   // cannot show where this clip's logo or banner actually sits.
@@ -140,15 +143,39 @@ export function PreviewPane() {
     };
   }, [dubPath]);
 
+  useEffect(() => {
+    if (!backgroundAudioPath) {
+      setBgUrl(null);
+      return;
+    }
+    let alive = true;
+    void toAssetUrl(backgroundAudioPath).then((url) => {
+      if (alive) setBgUrl(url);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [backgroundAudioPath]);
+
   // The dub plays *over* the clip, never instead of it: while a dub is
   // audible the original is turned down (or muted when the user asked to drop
   // it), so the music and room tone of the source survive the preview.
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
-    const underDub = previewDub && Boolean(dubUrl);
-    video.volume = underDub ? (keepOriginalAudio ? duckGain : 0) : 1;
-  }, [previewDub, dubUrl, keepOriginalAudio, duckGain, source?.url]);
+    if (video) {
+      const underDub = previewDub && Boolean(dubUrl);
+      if (!keepOriginalAudio) {
+        video.volume = 0;
+      } else {
+        video.volume = underDub ? duckGain : 1;
+      }
+    }
+    const bg = bgAudioRef.current;
+    if (bg) {
+      const underDub = previewDub && Boolean(dubUrl);
+      bg.volume = underDub ? duckGain : 1;
+    }
+  }, [previewDub, dubUrl, bgUrl, keepOriginalAudio, duckGain, source?.url]);
 
   useEffect(() => {
     player.attachAudio(audioRef.current);
@@ -156,14 +183,28 @@ export function PreviewPane() {
   }, [dubUrl]);
 
   useEffect(() => {
+    player.attachBgAudio(bgAudioRef.current);
+    return () => player.attachBgAudio(null);
+  }, [bgUrl]);
+
+  useEffect(() => {
     if (!playing || !previewDub || !dubUrl) {
       player.syncDub(false);
-      return;
+    } else {
+      player.syncDub(true);
     }
-    player.syncDub(true);
-    const timer = window.setInterval(() => player.syncDub(true), 1000);
+    if (!playing || !bgUrl) {
+      player.syncBgAudio(false);
+    } else {
+      player.syncBgAudio(true);
+    }
+    if (!playing || ((!previewDub || !dubUrl) && !bgUrl)) return;
+    const timer = window.setInterval(() => {
+      if (previewDub && dubUrl) player.syncDub(true);
+      if (bgUrl) player.syncBgAudio(true);
+    }, 1000);
     return () => window.clearInterval(timer);
-  }, [playing, previewDub, dubUrl]);
+  }, [playing, previewDub, dubUrl, bgUrl]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -412,18 +453,62 @@ export function PreviewPane() {
     if (!source?.path) return;
     try {
       pushLog("info", "Đang quét & dịch nhanh vùng OCR tại khung hình hiện tại…");
+      const currentState = useEditor.getState();
       const res = await ocrRegionTranslate({
         video_path: source.path,
         timestamp: playhead,
         region: shownRegion,
-        source_language: useEditor.getState().sourceLanguage,
-        target_language: useEditor.getState().targetLanguage,
-        translate_provider: useEditor.getState().translateProvider,
+        source_language: currentState.sourceLanguage,
+        target_language: currentState.targetLanguage,
+        translate_provider: currentState.translateProvider,
       });
-      pushLog(
-        "success",
-        `OCR Dịch vùng [${formatTime(res.timestamp)}]: "${res.text}" → "${res.translation}"`,
-      );
+
+      const scannedText = (res.text || "").trim();
+      const scannedTranslation = (res.translation || "").trim();
+      if (scannedText) {
+        const latestState = useEditor.getState();
+        const existing = latestState.segments.find(
+          (s) => res.timestamp >= s.start - 0.05 && res.timestamp <= s.end + 0.05,
+        );
+        if (existing) {
+          latestState.patchSegment(existing.index, {
+            text: scannedText,
+            ...(scannedTranslation ? { translation: scannedTranslation } : {}),
+          });
+          latestState.update({ selected: existing.index });
+          pushLog(
+            "success",
+            `Đã ghi đè dòng #${existing.index} [${formatTime(res.timestamp)}]: "${scannedText}"${scannedTranslation ? ` → "${scannedTranslation}"` : ""}`,
+          );
+        } else {
+          const segStart = Math.max(0, Number((res.timestamp - 0.5).toFixed(2)));
+          const maxEnd = latestState.source?.duration || res.timestamp + 1.5;
+          const segEnd = Number(Math.min(maxEnd, Math.max(segStart + 0.5, res.timestamp + 1.5)).toFixed(2));
+          const inserted = {
+            index: 0,
+            start: segStart,
+            end: segEnd,
+            text: scannedText,
+            ...(scannedTranslation ? { translation: scannedTranslation } : {}),
+          };
+          const merged = [...latestState.segments, inserted]
+            .sort((a, b) => a.start - b.start)
+            .map((item, idx) => ({ ...item, index: idx + 1 }));
+          const addedIdx = merged.find((item) => item === inserted)?.index ?? merged[0]?.index ?? null;
+          useEditor.setState({
+            segments: merged,
+            selected: addedIdx,
+            dubDirty: latestState.dub !== null,
+            projectDirty: true,
+          });
+          pushLog(
+            "success",
+            `Đã thêm dòng #${addedIdx ?? ""} [${formatTime(segStart)}–${formatTime(segEnd)}]: "${scannedText}"${scannedTranslation ? ` → "${scannedTranslation}"` : ""}`,
+          );
+        }
+      } else {
+        pushLog("warn", `OCR Dịch vùng [${formatTime(res.timestamp)}]: không đọc được chữ trong vùng chọn.`);
+      }
     } catch (err) {
       pushLog("error", `OCR Dịch vùng thất bại: ${(err as Error).message}`);
     }
@@ -1065,6 +1150,7 @@ export function PreviewPane() {
       </div>
 
       <audio ref={audioRef} src={dubUrl ?? undefined} preload="auto" className="hidden" />
+      <audio ref={bgAudioRef} src={bgUrl ?? undefined} preload="auto" className="hidden" />
     </section>
   );
 }

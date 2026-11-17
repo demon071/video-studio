@@ -243,6 +243,37 @@ def test_merge_observations_never_glues_two_different_lines() -> None:
     assert [text for _, _, text in cues] == ["Em làm mẹ"]
 
 
+def test_merge_observations_uses_majority_reading_over_single_noisy_frame() -> None:
+    observations = [
+        (0.0, "Tôi đi học"),
+        (0.5, "Tôi đi học"),
+        (1.0, "Tôi đi học |"),
+        (1.5, "Tôi đi học"),
+    ]
+
+    cues = ocr_service.merge_observations(observations, fps=2.0)
+
+    assert len(cues) == 1
+    assert cues[0][2] == "Tôi đi học"
+
+
+def test_merge_observations_merges_duplicate_runs_split_by_single_glitch_frame() -> None:
+    observations = [
+        (0.0, "Xin chào"),
+        (0.5, "Xin chào"),
+        (1.0, "X|"),
+        (1.5, "Xin chào"),
+        (2.0, "Xin chào"),
+    ]
+
+    cues = ocr_service.merge_observations(observations, fps=2.0)
+
+    assert len(cues) == 1
+    assert cues[0][2] == "Xin chào"
+    assert cues[0][0] == 0.0
+    assert cues[0][1] == pytest.approx(2.25)
+
+
 def test_ocr_defaults_keep_the_accents_inside_the_scanned_band() -> None:
     settings = Settings()
 

@@ -22,6 +22,8 @@ class QueueAddRequest(BaseModel):
     tts_provider: str = "capcut"
     tts_voice: str | None = None
     aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
+    bgm_mode: Literal["keep", "strip", "mute", "custom"] = "keep"
+    bgm_path: str | None = None
 
 
 class QueueStartRequest(BaseModel):
@@ -50,6 +52,8 @@ def add_to_queue(request: QueueAddRequest) -> dict:
         tts_provider=request.tts_provider,
         tts_voice=request.tts_voice,
         aspect=request.aspect,
+        bgm_mode=request.bgm_mode,
+        bgm_path=request.bgm_path,
     )
 
 

@@ -50,6 +50,8 @@ class QueueItem:
     tts_provider: str = "capcut"
     tts_voice: str | None = None
     aspect: str = "9:16"
+    bgm_mode: str = "keep"
+    bgm_path: str | None = None
     segments_count: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -118,6 +120,8 @@ class ProcessingQueueManager:
         tts_provider: str = "capcut",
         tts_voice: str | None = None,
         aspect: str = "9:16",
+        bgm_mode: str = "keep",
+        bgm_path: str | None = None,
     ) -> dict[str, Any]:
         resolved_stt = stt_provider or ("ocr" if source_mode == "ocr" else "local")
         with self._lock:
@@ -136,6 +140,8 @@ class ProcessingQueueManager:
                     tts_provider=tts_provider,
                     tts_voice=tts_voice,
                     aspect=aspect,
+                    bgm_mode=bgm_mode,
+                    bgm_path=bgm_path,
                 )
                 self._items.append(item)
             self._save()
@@ -324,6 +330,11 @@ class ProcessingQueueManager:
                 ).model_dump(mode="json")
                 dub_file.write_text(json.dumps(dub_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+                if item.bgm_mode == "strip":
+                    self._update_item(item, progress=0.78, stage="Tách bỏ nhạc nền (AI)...")
+                    vocals, _inst = media_processor.separate_vocals(source, work_folder)
+                    self._update_item(item, bgm_path=str(vocals))
+
                 if mode == "process_only":
                     self._update_item(
                         item,
@@ -334,6 +345,23 @@ class ProcessingQueueManager:
                     return
 
             if mode in ("process_and_export", "export_selected"):
+                bg_path: str | Path | None = None
+                keep_orig = True
+                if item.bgm_mode == "strip":
+                    if item.bgm_path and Path(item.bgm_path).is_file():
+                        bg_path = item.bgm_path
+                    else:
+                        self._update_item(item, progress=0.78, stage="Tách bỏ nhạc nền (AI)...")
+                        vocals, _inst = media_processor.separate_vocals(source, work_folder)
+                        bg_path = vocals
+                        self._update_item(item, bgm_path=str(vocals))
+                    keep_orig = False
+                elif item.bgm_mode == "custom" and item.bgm_path and Path(item.bgm_path).is_file():
+                    bg_path = item.bgm_path
+                    keep_orig = False
+                elif item.bgm_mode == "mute":
+                    keep_orig = False
+
                 self._update_item(item, progress=0.85, stage="Xuất video MP4...")
                 out_dir = settings.data_path / "exports"
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -344,7 +372,8 @@ class ProcessingQueueManager:
                     aspect=item.aspect,
                     subtitle_path=ass_path if ass_path.is_file() else None,
                     dub_track_path=dub_track_path if dub_track_path.is_file() else None,
-                    keep_original_audio=True,
+                    background_path=bg_path,
+                    keep_original_audio=keep_orig,
                 )
                 self._update_item(
                     item,

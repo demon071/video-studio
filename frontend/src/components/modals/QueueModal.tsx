@@ -3,6 +3,7 @@ import {
   Eraser,
   Eye,
   FilePlus2,
+  FolderOpen,
   ListChecks,
   Loader2,
   Play,
@@ -18,11 +19,12 @@ import {
   clearCompletedQueue,
   fetchQueue,
   fetchQueuePreview,
+  openSystemPath,
   removeQueueItem,
   startQueueBatch,
   stopQueueBatch,
 } from "@/lib/api";
-import { pickVideos } from "@/lib/media";
+import { pickAudio, pickVideos } from "@/lib/media";
 import { openVideo } from "@/lib/tasks";
 import { DEFAULT_VOICES, useEditor } from "@/store/editorStore";
 import type { Aspect, QueueSnapshot, SttProvider, TranslateProvider, TtsProvider } from "@/types/editor";
@@ -67,6 +69,10 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
   const [ttsProvider, setTtsProvider] = useState<TtsProvider>(state.ttsProvider);
   const [ttsVoice, setTtsVoice] = useState<string>(state.ttsVoice || DEFAULT_VOICES[state.ttsProvider]);
   const [aspect, setAspect] = useState<Aspect>(state.aspect);
+  const [bgmMode, setBgmMode] = useState<"keep" | "strip" | "mute" | "custom">(
+    state.backgroundAudioPath ? "custom" : state.keepOriginalAudio ? "keep" : "mute",
+  );
+  const [bgmPath, setBgmPath] = useState<string>(state.backgroundAudioPath || "");
 
   const refresh = async () => {
     try {
@@ -98,6 +104,8 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
           tts_provider: ttsProvider,
           tts_voice: ttsVoice,
           aspect,
+          bgm_mode: bgmMode,
+          bgm_path: bgmMode === "custom" ? bgmPath.trim() || null : null,
         }),
       );
     } catch (err) {
@@ -124,6 +132,11 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
         dubDirty: false,
         aspect: (res.item.aspect as Aspect) || state.aspect,
         selected: res.segments[0]?.index ?? null,
+        backgroundAudioPath:
+          res.item.bgm_mode === "strip" || res.item.bgm_mode === "custom"
+            ? (res.item.bgm_path ?? null)
+            : null,
+        keepOriginalAudio: res.item.bgm_mode === "keep" || !res.item.bgm_mode,
       });
       state.pushLog(
         "success",
@@ -161,7 +174,7 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
         </header>
 
         {/* Batch pipeline configuration */}
-        <div className="grid grid-cols-2 gap-2 border-b border-border bg-surface-2/60 px-4 py-2.5 text-[11px] sm:grid-cols-5">
+        <div className="grid grid-cols-2 gap-2 border-b border-border bg-surface-2/60 px-4 py-2.5 text-[11px] sm:grid-cols-6">
           <label className="flex flex-col gap-1">
             <span className="text-[10px] text-slate-400">1. Tách sub</span>
             <select
@@ -249,6 +262,31 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
                 <option value="1:1">1:1</option>
               </select>
             </label>
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] text-slate-400">4. Nhạc nền (Bản quyền)</span>
+            <select
+              className="field !py-1 !text-[11px]"
+              value={bgmMode}
+              onChange={(e) => setBgmMode(e.target.value as "keep" | "strip" | "mute" | "custom")}
+            >
+              <option value="keep">Giữ âm gốc</option>
+              <option value="strip">Xóa nhạc nền gốc (AI)</option>
+              <option value="custom">Thay nhạc nền riêng…</option>
+              <option value="mute">Tắt hẳn âm gốc</option>
+            </select>
+            {bgmMode === "custom" && (
+              <button
+                className="btn-ghost !px-1.5 !py-0.5 !text-[10px] text-emerald-300"
+                onClick={async () => {
+                  const p = await pickAudio();
+                  if (p) setBgmPath(p);
+                }}
+                title={bgmPath || "Chọn file nhạc nền"}
+              >
+                {bgmPath ? "Đã chọn nhạc" : "Chọn file nhạc…"}
+              </button>
+            )}
           </div>
         </div>
 
@@ -367,6 +405,34 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
               </div>
 
               <div className="flex shrink-0 items-center gap-1">
+                {item.output_path && (
+                  <>
+                    <button
+                      className="btn-ghost !px-2 !py-1 !text-[10px] text-emerald-300"
+                      title="Mở video đã xuất bằng trình phát mặc định"
+                      onClick={() =>
+                        void openSystemPath(item.output_path!, "open").catch((err) =>
+                          setErrorMsg((err as Error).message),
+                        )
+                      }
+                    >
+                      <Play size={11} />
+                      Xem video
+                    </button>
+                    <button
+                      className="btn-ghost !px-2 !py-1 !text-[10px] text-emerald-300"
+                      title="Mở thư mục chứa video đã xuất"
+                      onClick={() =>
+                        void openSystemPath(item.output_path!, "reveal").catch((err) =>
+                          setErrorMsg((err as Error).message),
+                        )
+                      }
+                    >
+                      <FolderOpen size={11} />
+                      Mở thư mục
+                    </button>
+                  </>
+                )}
                 {(item.status === "ready_to_export" || item.status === "completed") && (
                   <button
                     className="btn-ghost !px-2 !py-1 !text-[10px] text-sky-300"
@@ -399,6 +465,24 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
         <footer className="flex items-center justify-between border-t border-border px-4 py-2.5 text-[11px] text-slate-500">
           <span>Tổng cộng: {snap?.items.length ?? 0} video</span>
           <div className="flex items-center gap-2">
+            {(() => {
+              const firstOut = snap?.items.find((i) => i.output_path)?.output_path;
+              if (!firstOut) return null;
+              return (
+                <button
+                  className="btn-ghost !py-1 !text-[11px] text-emerald-300"
+                  title="Mở thư mục lưu các video đã xuất"
+                  onClick={() =>
+                    void openSystemPath(firstOut, "reveal").catch((err) =>
+                      setErrorMsg((err as Error).message),
+                    )
+                  }
+                >
+                  <FolderOpen size={11} />
+                  Mở thư mục lưu
+                </button>
+              );
+            })()}
             <button
               className="btn-ghost !py-1 !text-[11px]"
               onClick={async () => setSnap(await clearCompletedQueue())}

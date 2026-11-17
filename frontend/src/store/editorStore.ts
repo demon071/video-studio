@@ -137,6 +137,13 @@ interface EditorState {
   aiPack: AiPackStatus | null;
   socket: SocketState;
   job: ActiveJob | null;
+  lastExport: {
+    output_path: string;
+    width: number;
+    height: number;
+    size_bytes: number;
+    elapsed_s: number;
+  } | null;
   logs: LogLine[];
   pending: Record<string, boolean>;
   // tool settings
@@ -155,6 +162,7 @@ interface EditorState {
   /** Level of the original track while the dub speaks (0 = mute, 1 = untouched). */
   duckGain: number;
   voiceGain: number;
+  backgroundAudioPath: string | null;
   // CapCap v9.0.1 ASR & Diarization settings
   dedupEnabled: boolean;
   dedupSimilarity: number;
@@ -323,6 +331,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   aiPack: null,
   socket: "connecting",
   job: null,
+  lastExport: null,
   logs: [],
   pending: {},
   sttProvider: "local",
@@ -340,6 +349,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   // competing with the voice on top of it; the sidechain dips it further.
   duckGain: 0.35,
   voiceGain: 1.0,
+  backgroundAudioPath: null,
   dedupEnabled: true,
   dedupSimilarity: 0.82,
   hallucinationFilter: true,
@@ -386,6 +396,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       selected: null,
       dub: null,
       dubDirty: false,
+      backgroundAudioPath: null,
       subtitlePath: null,
       playhead: 0,
       playing: false,

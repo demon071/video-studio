@@ -15,6 +15,7 @@ import {
   remixDub,
   renderFastPreview,
   renderVideo,
+  stripVideoBgm,
   synthesizeCue,
   synthesizeDub,
   transcribeVideo,
@@ -562,6 +563,30 @@ export async function runDub(): Promise<void> {
   }
 }
 
+export async function runStripBgm(): Promise<void> {
+  const state = store();
+  const source = state.source;
+  if (!source?.path) {
+    state.pushLog("warn", "Hãy mở video trước khi tách nhạc nền.");
+    return;
+  }
+  state.beginTask("stripBgm");
+  state.pushLog("info", "Đang tách bỏ nhạc nền bản quyền bằng AI (UVR-MDX)…");
+  try {
+    const res = await stripVideoBgm(source.path);
+    useEditor.setState({
+      backgroundAudioPath: res.output_path,
+      keepOriginalAudio: false,
+      projectDirty: true,
+    });
+    state.pushLog("success", `Đã tách bỏ nhạc nền gốc → giữ lại âm thoại sạch: ${res.output_path}`);
+  } catch (error) {
+    state.pushLog("error", `Tách nhạc nền thất bại: ${message(error)}`);
+  } finally {
+    state.endTask("stripBgm");
+  }
+}
+
 export async function runExport(): Promise<void> {
   const state = store();
   const source = state.source;
@@ -574,6 +599,7 @@ export async function runExport(): Promise<void> {
   const output = (await pickSavePath(suggested)) ?? null;
   if (!output) return;
 
+  state.update({ lastExport: null });
   state.beginTask("render");
   try {
     let subtitlePath: string | null = null;
@@ -601,6 +627,7 @@ export async function runExport(): Promise<void> {
       aspect: state.aspect,
       subtitle_path: subtitlePath,
       dub_track_path: state.dub?.track_path ?? null,
+      background_path: state.backgroundAudioPath,
       background_gain: state.duckGain,
       voice_gain: state.voiceGain,
       keep_original_audio: !state.dub || state.keepOriginalAudio,
@@ -611,6 +638,15 @@ export async function runExport(): Promise<void> {
       video_clips: isClipsEdited(state.videoClips, source.duration)
         ? state.videoClips.map((c) => ({ source_start: c.source_start, source_end: c.source_end }))
         : undefined,
+    });
+    state.update({
+      lastExport: {
+        output_path: result.output_path,
+        width: result.width,
+        height: result.height,
+        size_bytes: result.size_bytes,
+        elapsed_s: result.elapsed_s,
+      },
     });
     state.pushLog(
       "success",
@@ -655,6 +691,7 @@ export async function runFastPreview(): Promise<string | null> {
       aspect: state.aspect,
       subtitle_path: subtitlePath,
       dub_track_path: state.dub?.track_path ?? null,
+      background_path: state.backgroundAudioPath,
       background_gain: state.duckGain,
       voice_gain: state.voiceGain,
       keep_original_audio: !state.dub || state.keepOriginalAudio,

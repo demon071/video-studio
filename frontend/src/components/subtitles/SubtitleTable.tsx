@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronsRight, History, Loader2, Plus, RotateCw, ScanText, Trash2, Volume2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { CueReadingDialog } from "@/components/subtitles/CueReadingDialog";
 import { SubtitleStylePanel } from "@/components/subtitles/SubtitleStylePanel";
@@ -47,6 +47,13 @@ export function SubtitleTable() {
 
   /** Cue whose frame is being read again; the dialog does the rest. */
   const [readingCue, setReadingCue] = useState<SubtitleSegment | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (selected === null || collapsed) return;
+    const row = listRef.current?.querySelector<HTMLElement>(`[data-cue-index="${selected}"]`);
+    row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [selected, collapsed]);
 
   const reports = useMemo(() => {
     const map = new Map<number, DubbingSegmentReport>();
@@ -163,7 +170,7 @@ export function SubtitleTable() {
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto">
         {segments.length === 0 && (
           <p className="p-4 text-center text-[11px] leading-relaxed text-slate-600">
             Chưa có phụ đề. Chạy <span className="text-slate-400">Tạo phụ đề tự động</span> ở panel AI, hoặc bấm
@@ -179,6 +186,7 @@ export function SubtitleTable() {
           return (
             <div
               key={segment.index}
+              data-cue-index={segment.index}
               onClick={(event) => {
                 if ((event.target as HTMLElement).closest("input, textarea, button")) return;
                 update({ selected: segment.index });

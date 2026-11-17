@@ -7,6 +7,7 @@ import {
   Film,
   Layers,
   Maximize2,
+  Music,
   Music2,
   Ruler,
   ScanText,
@@ -15,11 +16,13 @@ import {
   Split,
   Trash2,
   Undo2,
+  VolumeX,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { clipTimelineBounds, timelineDuration } from "@/lib/clips";
 import { clamp, formatTime } from "@/lib/format";
+import { baseName } from "@/lib/media";
 import { player } from "@/lib/player";
 import {
   deleteTimelineClip,
@@ -36,6 +39,7 @@ const TRACKS = [
   { id: "layers", label: "Lớp phủ", icon: Layers, accent: "bg-violet-500/70 border-violet-400" },
   { id: "subtitle", label: "Phụ đề", icon: Captions, accent: "bg-track-subtitle/80 border-track-subtitle" },
   { id: "dub", label: "Lồng tiếng", icon: Music2, accent: "bg-track-dubbed/80 border-track-dubbed" },
+  { id: "bgm", label: "Âm nền", icon: Music, accent: "bg-emerald-600/70 border-emerald-400" },
 ] as const;
 
 const STEPS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120];
@@ -49,6 +53,8 @@ export function TimelinePane() {
   const selectedLayerId = useEditor((state) => state.selectedLayerId);
   const patchLayer = useEditor((state) => state.patchLayer);
   const dub = useEditor((state) => state.dub);
+  const backgroundAudioPath = useEditor((state) => state.backgroundAudioPath);
+  const keepOriginalAudio = useEditor((state) => state.keepOriginalAudio);
   const playhead = useEditor((state) => state.playhead);
   const playing = useEditor((state) => state.playing);
   const zoom = useEditor((state) => state.zoom);
@@ -113,7 +119,7 @@ export function TimelinePane() {
   };
 
   return (
-    <section className={`flex shrink-0 flex-col border-t border-border bg-surface-1 ${collapsed ? "h-8" : "h-64"}`}>
+    <section className={`flex shrink-0 flex-col border-t border-border bg-surface-1 ${collapsed ? "h-8" : "h-72"}`}>
       <header className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-border px-3 py-1">
         <button
           className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400 hover:text-slate-200"
@@ -377,6 +383,11 @@ export function TimelinePane() {
                         title="Kéo sang phải để cắt đầu đoạn"
                       />
                       <Film size={10} className="shrink-0 opacity-80" />
+                      {!keepOriginalAudio && (
+                        <span title="Đã tắt tiếng gốc" className="shrink-0 text-amber-300">
+                          <VolumeX size={10} />
+                        </span>
+                      )}
                       <span className="truncate text-[10px] font-medium">
                         {videoTrimDrag?.clipId === clip.id
                           ? `${previewStart.toFixed(1)}s–${previewEnd.toFixed(1)}s`
@@ -561,9 +572,10 @@ export function TimelinePane() {
               {segments.map((segment) => {
                 const width = Math.max((segment.end - segment.start) * pps, 6);
                 const isActive = playhead >= segment.start && playhead < segment.end;
+                const displayText = segment.translation?.trim() || segment.text || `#${segment.index}`;
                 return (
                   <button
-                    key={segment.index}
+                    key={`${segment.index}-${segment.start}-${segment.end}`}
                     data-clip
                     className={`absolute inset-y-1.5 overflow-hidden rounded border px-1 text-left text-[9px] leading-none transition-colors ${
                       selected === segment.index
@@ -573,13 +585,13 @@ export function TimelinePane() {
                           : "border-track-subtitle bg-track-subtitle/70 text-amber-50/90 hover:bg-track-subtitle"
                     }`}
                     style={{ left: segment.start * pps, width }}
-                    title={`#${segment.index} · ${segment.text || "(trống)"}`}
+                    title={`#${segment.index} · ${segment.text || "(trống)"}${segment.translation?.trim() ? `\n→ ${segment.translation}` : ""}`}
                     onClick={() => {
                       update({ selected: segment.index });
                       setPlayhead(segment.start, { seek: true });
                     }}
                   >
-                    <span className="flex h-full items-center">{segment.text || `#${segment.index}`}</span>
+                    <span className="flex h-full items-center truncate">{displayText}</span>
                   </button>
                 );
               })}
@@ -591,7 +603,7 @@ export function TimelinePane() {
             </div>
 
             {/* Dubbing lane */}
-            <div className="relative h-11">
+            <div className="relative h-11 border-b border-border/60">
               {dub?.segments.map((report) => {
                 const width = Math.max((report.end - report.start) * pps, 6);
                 return (
@@ -618,6 +630,35 @@ export function TimelinePane() {
               {!dub && (
                 <span className="absolute left-2 top-3 text-[10px] text-slate-600">
                   chưa lồng tiếng
+                </span>
+              )}
+            </div>
+
+            {/* Clean/Replacement BGM lane */}
+            <div className="relative h-11">
+              {backgroundAudioPath ? (
+                <div
+                  data-clip
+                  className="absolute inset-y-1.5 flex items-center gap-1.5 overflow-hidden rounded border border-emerald-400 bg-emerald-600/75 px-2 text-[10px] text-emerald-50"
+                  style={{ left: 0, width: Math.max(duration * pps, 24) }}
+                  title={backgroundAudioPath}
+                >
+                  <Music size={10} className="shrink-0" />
+                  <span className="truncate font-medium">{baseName(backgroundAudioPath)}</span>
+                  <button
+                    className="ml-auto shrink-0 rounded px-1 text-emerald-200 hover:bg-black/25 hover:text-rose-300"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      update({ backgroundAudioPath: null, keepOriginalAudio: true });
+                    }}
+                    title="Bỏ track âm nền này & bật lại tiếng gốc"
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : (
+                <span className="absolute left-2 top-3 text-[10px] text-slate-600">
+                  chưa có âm nền thay thế / đã tách nhạc
                 </span>
               )}
             </div>

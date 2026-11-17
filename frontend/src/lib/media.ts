@@ -55,6 +55,18 @@ export async function pickImage(): Promise<string | null> {
   return typeof selection === "string" ? selection : null;
 }
 
+export async function pickAudio(): Promise<string | null> {
+  if (!isDesktop) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selection = await open({
+    title: "Chọn file nhạc nền (BGM)",
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Audio", extensions: ["mp3", "wav", "m4a", "flac", "aac", "ogg"] }],
+  });
+  return typeof selection === "string" ? selection : null;
+}
+
 export async function pickSavePath(defaultName: string): Promise<string | null> {
   if (!isDesktop) return null;
   const { save } = await import("@tauri-apps/plugin-dialog");

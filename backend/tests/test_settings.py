@@ -134,7 +134,7 @@ def test_unknown_choices_are_rejected(tmp_path: Path, patch: dict) -> None:
 def test_describe_offers_two_ocr_profiles_and_two_audio_modes(tmp_path: Path) -> None:
     payload = provider_config.describe(_settings(tmp_path))
 
-    assert [item["name"] for item in payload["ocr"]["profiles"]] == ["small", "tiny"]
+    assert [item["name"] for item in payload["ocr"]["profiles"]] == ["small", "tiny", "medium", "server"]
     assert payload["ocr"]["profiles"][1]["installed"] is False
     assert [item["name"] for item in payload["audio"]["modes"]] == ["fast", "clean"]
     assert payload["audio"]["separator_model"] == "uvr-mdx-inst-hq3"

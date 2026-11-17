@@ -73,6 +73,26 @@ def thumbnail(request: ThumbnailRequest) -> ThumbnailResult:
     return ThumbnailResult(**run_job("thumbnail", work))
 
 
+@router.post("/api/media/strip-bgm")
+def strip_bgm(request: ProbeRequest) -> dict:
+    """Separate vocals/speech from background music using UVR-MDX so copyright BGM is removed."""
+    source = Path(request.video_path)
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail=f"Video not found: {source}")
+    folder = work_dir("strip-bgm")
+
+    def work(report) -> dict:
+        report(stage="media_tools", fraction=0.1, message="Đang tách bỏ nhạc nền bằng AI (UVR-MDX)...")
+        try:
+            vocals, _inst = media_processor.separate_vocals(source, folder)
+        except media_processor.MediaError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        report(fraction=1.0, message="Đã tách bỏ nhạc nền gốc")
+        return {"output_path": str(vocals)}
+
+    return run_job("media_tools", work)
+
+
 @router.post("/api/media/cut")
 def cut_timeline_video(request: TimelineCutRequest) -> dict:
     """Trim left, trim right, or delete a selected range from the timeline video."""

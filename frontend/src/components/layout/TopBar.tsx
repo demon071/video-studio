@@ -1,4 +1,4 @@
-import { ChevronDown, Cpu, FilePlus2, ListChecks, Loader2, Music, Save, Upload, Wrench, X } from "lucide-react";
+import { ChevronDown, Cpu, FilePlus2, FolderOpen, ListChecks, Loader2, Music, Play, Save, Upload, Wrench, X } from "lucide-react";
 import { useState } from "react";
 
 import { MediaToolsModal } from "@/components/modals/MediaToolsModal";
@@ -6,7 +6,7 @@ import { QueueModal } from "@/components/modals/QueueModal";
 import { ProjectMenu } from "@/components/project/ProjectMenu";
 import { formatPercent } from "@/lib/format";
 import { pickVideo } from "@/lib/media";
-import { cancelJob } from "@/lib/api";
+import { cancelJob, openSystemPath } from "@/lib/api";
 import { saveCurrentProject } from "@/lib/project";
 import { openVideo, runExport, runExportAudio } from "@/lib/tasks";
 import { useEditor } from "@/store/editorStore";
@@ -33,6 +33,8 @@ export function TopBar() {
   const segmentCount = useEditor((state) => state.segments.length);
   const qualityProfile = useEditor((state) => state.qualityProfile);
   const useNvenc = useEditor((state) => state.useNvenc);
+  const lastExport = useEditor((state) => state.lastExport);
+  const pushLog = useEditor((state) => state.pushLog);
 
   const [showQueue, setShowQueue] = useState(false);
   const [showMediaTools, setShowMediaTools] = useState(false);
@@ -232,6 +234,40 @@ export function TopBar() {
         <span className="rounded bg-track-dubbed/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
           có lồng tiếng
         </span>
+      )}
+
+      {lastExport && !(job && (job.state === "running" || job.state === "queued")) && (
+        <div
+          className="flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px]"
+          title={lastExport.output_path}
+        >
+          <span className="max-w-[140px] truncate font-mono text-[10px] text-emerald-300">
+            Đã xuất: {lastExport.output_path.split(/[\\/]/).pop()}
+          </span>
+          <button
+            className="btn-ghost !px-1.5 !py-0.5 !text-[10px] text-emerald-200 hover:text-white"
+            onClick={() => void openSystemPath(lastExport.output_path, "open").catch((e) => pushLog("error", (e as Error).message))}
+            title="Mở video vừa xuất bằng trình phát mặc định"
+          >
+            <Play size={10} />
+            Xem video
+          </button>
+          <button
+            className="btn-ghost !px-1.5 !py-0.5 !text-[10px] text-emerald-200 hover:text-white"
+            onClick={() => void openSystemPath(lastExport.output_path, "reveal").catch((e) => pushLog("error", (e as Error).message))}
+            title="Mở thư mục chứa video vừa xuất"
+          >
+            <FolderOpen size={10} />
+            Mở thư mục
+          </button>
+          <button
+            className="rounded p-0.5 text-emerald-300/70 hover:text-white"
+            onClick={() => update({ lastExport: null })}
+            title="Đóng"
+          >
+            <X size={10} />
+          </button>
+        </div>
       )}
 
       {showQueue && <QueueModal onClose={() => setShowQueue(false)} />}

@@ -12,7 +12,6 @@ const GROUPS: Array<{ kind: ModelStatus["kind"]; title: string; hint: string }> 
   { kind: "stt", title: "Nhận dạng giọng nói", hint: "faster-whisper / SenseVoice, chạy offline" },
   { kind: "tts", title: "Giọng đọc offline", hint: "OmniVoice / VoiceStudio" },
   { kind: "separator", title: "Tách nhạc nền", hint: "UVR MDX-Net — dùng cho chế độ Giọng sạch" },
-  { kind: "ocr", title: "Đọc phụ đề cứng (OCR)", hint: "RapidOCR — bộ dò nhanh / chính xác" },
 ];
 
 export function ModelsPanel() {

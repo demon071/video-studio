@@ -58,6 +58,7 @@ vieneu>=3.8.4,<4
 # --- Vocal isolation (keep background music under the dub) ---
 # MDX-Net models run on ONNX Runtime; pulls librosa + extra audio libs.
 audio-separator>=0.48,<1.0
+audioread>=3.0
 
 # --- Online providers (used for translation) ---
 openai>=3.50

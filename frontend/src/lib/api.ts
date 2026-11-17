@@ -108,6 +108,14 @@ export async function fetchHardware(): Promise<HardwareReport> {
   }
 }
 
+export async function openSystemPath(path: string, action: "open" | "reveal" = "open"): Promise<void> {
+  try {
+    await api.post(ENDPOINTS.openPath, { path, action });
+  } catch (error) {
+    return fail(error);
+  }
+}
+
 export interface ModelCatalogue {
   models: ModelStatus[];
   models_path: string;
@@ -247,6 +255,19 @@ export async function waitForJob(
 export async function probeVideo(videoPath: string): Promise<ProbeResult> {
   try {
     const { data } = await api.post<ProbeResult>(ENDPOINTS.probe, { video_path: videoPath });
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function stripVideoBgm(videoPath: string): Promise<{ output_path: string }> {
+  try {
+    const { data } = await api.post<{ output_path: string }>(
+      ENDPOINTS.mediaStripBgm,
+      { video_path: videoPath },
+      long,
+    );
     return data;
   } catch (error) {
     return fail(error);
@@ -640,6 +661,8 @@ export async function addQueueItems(body: {
   tts_provider?: string;
   tts_voice?: string | null;
   aspect?: "9:16" | "16:9" | "1:1";
+  bgm_mode?: "keep" | "strip" | "mute" | "custom";
+  bgm_path?: string | null;
 }): Promise<QueueSnapshot> {
   try {
     const { data } = await api.post<QueueSnapshot>(ENDPOINTS.queueAdd, body);

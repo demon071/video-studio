@@ -224,6 +224,8 @@ export interface QueueItem {
   tts_provider: string;
   tts_voice?: string | null;
   aspect: string;
+  bgm_mode?: string;
+  bgm_path?: string | null;
   segments_count?: number;
 }
 
@@ -527,7 +529,7 @@ export interface ProviderConfig {
   slots: SettingSlot[];
 }
 
-export type OcrProfileName = "small" | "tiny";
+export type OcrProfileName = "small" | "tiny" | "medium" | "server";
 
 export interface OcrProfileInfo {
   name: OcrProfileName;

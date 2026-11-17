@@ -14,6 +14,7 @@ type TimeListener = (seconds: number) => void;
 class PlayerBridge {
   private element: HTMLVideoElement | null = null;
   private audio: HTMLAudioElement | null = null;
+  private bgAudio: HTMLAudioElement | null = null;
   private clipsProvider: (() => VideoClip[]) | null = null;
   private activeClipIndex = 0;
 
@@ -24,6 +25,10 @@ class PlayerBridge {
 
   attachAudio(audio: HTMLAudioElement | null): void {
     this.audio = audio;
+  }
+
+  attachBgAudio(audio: HTMLAudioElement | null): void {
+    this.bgAudio = audio;
   }
 
   setClipsProvider(provider: (() => VideoClip[]) | null): void {
@@ -81,12 +86,14 @@ class PlayerBridge {
         const limit = this.duration || mapped.sourceTime;
         this.element.currentTime = Math.min(Math.max(mapped.sourceTime, 0), limit);
         if (this.audio && this.audio.src) this.audio.currentTime = Math.max(0, seconds);
+        if (this.bgAudio && this.bgAudio.src) this.bgAudio.currentTime = Math.max(0, seconds);
         return;
       }
     }
     const limit = this.duration || seconds;
     this.element.currentTime = Math.min(Math.max(seconds, 0), limit);
     if (this.audio && this.audio.src) this.audio.currentTime = this.element.currentTime;
+    if (this.bgAudio && this.bgAudio.src) this.bgAudio.currentTime = this.element.currentTime;
   }
 
   async play(): Promise<void> {
@@ -119,6 +126,23 @@ class PlayerBridge {
   /** Keeps the dubbed track glued to the video (only used when a dub exists). */
   syncDub(enabled: boolean): void {
     const audio = this.audio;
+    const video = this.element;
+    if (!audio || !video) return;
+    if (!enabled || !audio.src) {
+      audio.pause();
+      return;
+    }
+    const tlTime = this.time;
+    if (Math.abs(audio.currentTime - tlTime) > 0.12) {
+      audio.currentTime = tlTime;
+    }
+    if (video.paused) audio.pause();
+    else void audio.play().catch(() => undefined);
+  }
+
+  /** Keeps the clean/replacement BGM track glued to the video timeline. */
+  syncBgAudio(enabled: boolean): void {
+    const audio = this.bgAudio;
     const video = this.element;
     if (!audio || !video) return;
     if (!enabled || !audio.src) {
