@@ -11,17 +11,17 @@ export function PronounReviewDialog({ onClose }: { onClose: () => void }) {
   const pending = useEditor((state) => Boolean(state.pending.analyzeContext));
   const update = useEditor((state) => state.update);
 
-  const [characters, setCharacters] = useState<ContextCharacter[]>(
-    () => contextResult?.characters ?? [],
+  const [characters, setCharacters] = useState<ContextCharacter[]>(() =>
+    Array.isArray(contextResult?.characters) ? contextResult.characters : [],
   );
-  const [guidanceText, setGuidanceText] = useState(() => contextGuidance);
+  const [guidanceText, setGuidanceText] = useState(() => contextGuidance || "");
 
   const handleAnalyze = async () => {
     await runAnalyzeContext();
     const fresh = useEditor.getState().contextResult;
     if (fresh) {
-      setCharacters(fresh.characters);
-      setGuidanceText(fresh.context_guidance);
+      setCharacters(Array.isArray(fresh.characters) ? fresh.characters : []);
+      setGuidanceText(fresh.context_guidance ?? fresh.context ?? "");
     }
   };
 
@@ -30,18 +30,19 @@ export function PronounReviewDialog({ onClose }: { onClose: () => void }) {
   };
 
   const applyAndClose = () => {
-    const charLines = characters
+    const safeChars = Array.isArray(characters) ? characters : [];
+    const charLines = safeChars
       .map(
         (c) =>
           `- ${c.name || c.id} (${c.gender || "?"}, ${c.role || ""}): tự xưng "${c.self_pronoun}", gọi đối phương "${c.address_others}"`,
       )
       .join("\n");
-    const combined = [guidanceText.trim(), charLines ? `BẢNG XƯNG HÔ ĐÃ DUYỆT:\n${charLines}` : ""]
+    const combined = [(guidanceText ?? "").trim(), charLines ? `BẢNG XƯNG HÔ ĐÃ DUYỆT:\n${charLines}` : ""]
       .filter(Boolean)
       .join("\n\n");
     update({
       contextGuidance: combined,
-      contextResult: contextResult ? { ...contextResult, characters, context_guidance: combined } : null,
+      contextResult: contextResult ? { ...contextResult, characters: safeChars, context_guidance: combined } : null,
     });
     onClose();
   };

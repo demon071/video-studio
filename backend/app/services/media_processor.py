@@ -511,6 +511,49 @@ def stretch_to_fit(
 # ---------------------------------------------------------------------------
 # Track assembly
 # ---------------------------------------------------------------------------
+def apply_tempo(
+    source_audio: str | Path,
+    output_path: str | Path,
+    *,
+    ratio: float,
+    sample_rate: int = 24_000,
+) -> Path:
+    """Speed a TTS clip up by ``ratio`` without cutting anything off.
+
+    The dubbing planner already decided where the clip lands and how fast it
+    has to be; unlike :func:`stretch_to_fit` nothing is trimmed, so no word is
+    ever lost - a line that still runs long pushes the next one back instead.
+    """
+    source = Path(source_audio)
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    in_place = source.is_file() and target.exists() and source.resolve() == target.resolve()
+    actual_target = target.with_name(f"{target.stem}.tempo_tmp{target.suffix}") if in_place else target
+    filters: list[str] = []
+    if abs(ratio - 1.0) > 0.02:
+        filters.append(atempo_chain(ratio))
+    filters += ["asetpts=PTS-STARTPTS", f"aresample={sample_rate}", "aformat=channel_layouts=mono"]
+    _run(
+        [
+            *_base(),
+            "-i",
+            str(source),
+            "-af",
+            ",".join(filters),
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(actual_target),
+        ]
+    )
+    if in_place and actual_target.is_file():
+        actual_target.replace(target)
+    return target
+
+
 def build_dub_track(
     clips: Sequence[tuple[float, str | Path]],
     output_path: str | Path,
@@ -753,11 +796,17 @@ def render_final(
             )
 
     work_dir = target.parent
+    sub_local: Path | None = None
+    temp_sub_source: Path | None = None
     if subtitle_path:
-        # Copy next to the output and reference it relatively: the most reliable
-        # way to survive spaces, unicode and drive letters in a filter argument.
+        # Copy next to the output under a hidden temporary name and remove it
+        # in `finally`: leaving `<video_stem>.ass` next to `<video_stem>.mp4`
+        # causes desktop media players (VLC, WMP, PotPlayer) to auto-load the
+        # external .ass on top of the already burned-in hardsubs!
         sub_source = Path(subtitle_path)
-        sub_name = f"{target.stem}.{sub_source.suffix.lstrip('.')}"
+        if sub_source.name.startswith("."):
+            temp_sub_source = sub_source
+        sub_name = f".tmp_{target.stem}_burn.{sub_source.suffix.lstrip('.')}"
         sub_local = work_dir / sub_name
         if sub_source.resolve() != sub_local.resolve():
             shutil.copyfile(sub_source, sub_local)
@@ -894,15 +943,28 @@ def render_final(
         )
         return cmd_args
 
-    if use_nvenc:
-        try:
-            _run(_build_args(True), progress=progress, duration=duration, cwd=work_dir)
-            return target
-        except MediaError:
-            log.warning("h264_nvenc unavailable or failed; falling back to libx264")
+    try:
+        if use_nvenc:
+            try:
+                _run(_build_args(True), progress=progress, duration=duration, cwd=work_dir)
+                return target
+            except MediaError:
+                log.warning("h264_nvenc unavailable or failed; falling back to libx264")
 
-    _run(_build_args(False), progress=progress, duration=duration, cwd=work_dir)
-    return target
+        _run(_build_args(False), progress=progress, duration=duration, cwd=work_dir)
+        return target
+    finally:
+        for cleanup_file in (
+            sub_local,
+            temp_sub_source,
+            work_dir / f"{target.stem}.ass",
+            work_dir / f"{target.stem}.srt",
+        ):
+            if cleanup_file is not None:
+                try:
+                    cleanup_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -1137,6 +1199,7 @@ __all__ = [
     "MediaError",
     "SyncReport",
     "VideoInfo",
+    "apply_tempo",
     "atempo_chain",
     "build_dub_track",
     "concat_media",

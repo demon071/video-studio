@@ -21,6 +21,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import { clipTimelineBounds, timelineDuration } from "@/lib/clips";
+import { remixDub } from "@/lib/api";
 import { clamp, formatTime } from "@/lib/format";
 import { baseName } from "@/lib/media";
 import { player } from "@/lib/player";
@@ -49,6 +50,7 @@ export function TimelinePane() {
   const videoClips = useEditor((state) => state.videoClips);
   const selectedClipId = useEditor((state) => state.selectedClipId);
   const segments = useEditor((state) => state.segments);
+  const patchSegment = useEditor((state) => state.patchSegment);
   const layers = useEditor((state) => state.layers);
   const selectedLayerId = useEditor((state) => state.selectedLayerId);
   const patchLayer = useEditor((state) => state.patchLayer);
@@ -81,6 +83,22 @@ export function TimelinePane() {
     startClientX: number;
     origStart: number;
     origEnd: number;
+  } | null>(null);
+  const [subDrag, setSubDrag] = useState<{
+    index: number;
+    mode: "move" | "start" | "end";
+    startClientX: number;
+    origStart: number;
+    origEnd: number;
+    moved: boolean;
+  } | null>(null);
+  const [dubDrag, setDubDrag] = useState<{
+    index: number;
+    mode: "move" | "start" | "end";
+    startClientX: number;
+    origStart: number;
+    origEnd: number;
+    moved: boolean;
   } | null>(null);
 
   const duration = Math.max(
@@ -573,26 +591,120 @@ export function TimelinePane() {
                 const width = Math.max((segment.end - segment.start) * pps, 6);
                 const isActive = playhead >= segment.start && playhead < segment.end;
                 const displayText = segment.translation?.trim() || segment.text || `#${segment.index}`;
+
+                const handleSubMove = (e: React.PointerEvent<HTMLDivElement>) => {
+                  if (!subDrag || subDrag.index !== segment.index) return;
+                  e.stopPropagation();
+                  const deltaPx = e.clientX - subDrag.startClientX;
+                  if (Math.abs(deltaPx) > 2 && !subDrag.moved) {
+                    setSubDrag({ ...subDrag, moved: true });
+                  }
+                  const deltaSec = deltaPx / pps;
+                  if (subDrag.mode === "move") {
+                    const len = subDrag.origEnd - subDrag.origStart;
+                    const ns = clamp(subDrag.origStart + deltaSec, 0, Math.max(0, duration - len));
+                    patchSegment(segment.index, {
+                      start: Number(ns.toFixed(2)),
+                      end: Number((ns + len).toFixed(2)),
+                    });
+                  } else if (subDrag.mode === "start") {
+                    const ns = clamp(subDrag.origStart + deltaSec, 0, subDrag.origEnd - 0.2);
+                    patchSegment(segment.index, { start: Number(ns.toFixed(2)) });
+                  } else if (subDrag.mode === "end") {
+                    const ne = clamp(subDrag.origEnd + deltaSec, subDrag.origStart + 0.2, duration);
+                    patchSegment(segment.index, { end: Number(ne.toFixed(2)) });
+                  }
+                };
+
                 return (
-                  <button
-                    key={`${segment.index}-${segment.start}-${segment.end}`}
+                  <div
+                    key={segment.index}
                     data-clip
-                    className={`absolute inset-y-1.5 overflow-hidden rounded border px-1 text-left text-[9px] leading-none transition-colors ${
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      update({ selected: segment.index });
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                      setSubDrag({
+                        index: segment.index,
+                        mode: "move",
+                        startClientX: e.clientX,
+                        origStart: segment.start,
+                        origEnd: segment.end,
+                        moved: false,
+                      });
+                    }}
+                    onPointerMove={handleSubMove}
+                    onPointerUp={(e) => {
+                      if (subDrag?.index === segment.index) {
+                        e.stopPropagation();
+                        const wasMoved = subDrag.moved;
+                        setSubDrag(null);
+                        if (!wasMoved) {
+                          setPlayhead(segment.start, { seek: true });
+                        }
+                      }
+                    }}
+                    onPointerCancel={() => setSubDrag(null)}
+                    className={`group absolute inset-y-1.5 flex cursor-grab items-center overflow-hidden rounded border px-1.5 text-left text-[9px] leading-none transition-colors select-none touch-none ${
                       selected === segment.index
-                        ? "border-brand bg-track-subtitle text-white"
+                        ? "border-brand bg-track-subtitle text-white ring-1 ring-brand"
                         : isActive
                           ? "border-brand/60 bg-track-subtitle/90 text-white"
                           : "border-track-subtitle bg-track-subtitle/70 text-amber-50/90 hover:bg-track-subtitle"
                     }`}
                     style={{ left: segment.start * pps, width }}
-                    title={`#${segment.index} · ${segment.text || "(trống)"}${segment.translation?.trim() ? `\n→ ${segment.translation}` : ""}`}
-                    onClick={() => {
-                      update({ selected: segment.index });
-                      setPlayhead(segment.start, { seek: true });
-                    }}
+                    title={`#${segment.index} · ${segment.text || "(trống)"}${segment.translation?.trim() ? `\n→ ${segment.translation}` : ""}\n(Kéo để dịch chuyển, kéo 2 mép để co giãn thời lượng)`}
                   >
+                    <div
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        update({ selected: segment.index });
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                        setSubDrag({
+                          index: segment.index,
+                          mode: "start",
+                          startClientX: e.clientX,
+                          origStart: segment.start,
+                          origEnd: segment.end,
+                          moved: true,
+                        });
+                      }}
+                      onPointerMove={handleSubMove}
+                      onPointerUp={(e) => {
+                        if (subDrag?.index === segment.index) {
+                          e.stopPropagation();
+                          setSubDrag(null);
+                        }
+                      }}
+                      onPointerCancel={() => setSubDrag(null)}
+                      className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize bg-white/0 hover:bg-white/40"
+                    />
                     <span className="flex h-full items-center truncate">{displayText}</span>
-                  </button>
+                    <div
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        update({ selected: segment.index });
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                        setSubDrag({
+                          index: segment.index,
+                          mode: "end",
+                          startClientX: e.clientX,
+                          origStart: segment.start,
+                          origEnd: segment.end,
+                          moved: true,
+                        });
+                      }}
+                      onPointerMove={handleSubMove}
+                      onPointerUp={(e) => {
+                        if (subDrag?.index === segment.index) {
+                          e.stopPropagation();
+                          setSubDrag(null);
+                        }
+                      }}
+                      onPointerCancel={() => setSubDrag(null)}
+                      className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize bg-white/0 hover:bg-white/40"
+                    />
+                  </div>
                 );
               })}
               {!segments.length && (
@@ -606,21 +718,160 @@ export function TimelinePane() {
             <div className="relative h-11 border-b border-border/60">
               {dub?.segments.map((report) => {
                 const width = Math.max((report.end - report.start) * pps, 6);
+                const isSelected = selected === report.index;
+
+                const patchDubSegment = (patch: Partial<typeof report>) => {
+                  const curDub = useEditor.getState().dub;
+                  if (!curDub) return;
+                  const nextSegs = curDub.segments.map((item) =>
+                    item.index === report.index ? { ...item, ...patch } : item,
+                  );
+                  update({
+                    dub: { ...curDub, segments: nextSegs },
+                    projectDirty: true,
+                  });
+                };
+
+                const handleDubMove = (e: React.PointerEvent<HTMLDivElement>) => {
+                  if (!dubDrag || dubDrag.index !== report.index) return;
+                  e.stopPropagation();
+                  const deltaPx = e.clientX - dubDrag.startClientX;
+                  if (Math.abs(deltaPx) > 2 && !dubDrag.moved) {
+                    setDubDrag({ ...dubDrag, moved: true });
+                  }
+                  const deltaSec = deltaPx / pps;
+                  if (dubDrag.mode === "move") {
+                    const len = dubDrag.origEnd - dubDrag.origStart;
+                    const ns = clamp(dubDrag.origStart + deltaSec, 0, Math.max(0, duration - len));
+                    patchDubSegment({
+                      start: Number(ns.toFixed(2)),
+                      end: Number((ns + len).toFixed(2)),
+                    });
+                  } else if (dubDrag.mode === "start") {
+                    const ns = clamp(dubDrag.origStart + deltaSec, 0, dubDrag.origEnd - 0.2);
+                    const newDur = Math.max(dubDrag.origEnd - ns, 0.2);
+                    const newRatio = clamp(report.tts_duration / newDur, 0.5, 2.5);
+                    patchDubSegment({
+                      start: Number(ns.toFixed(2)),
+                      target_duration: Number(newDur.toFixed(3)),
+                      applied_ratio: Number(newRatio.toFixed(2)),
+                      clamped: newRatio > 1.35,
+                      overflow_s: 0,
+                    });
+                  } else if (dubDrag.mode === "end") {
+                    const ne = clamp(dubDrag.origEnd + deltaSec, dubDrag.origStart + 0.2, duration + 2);
+                    const newDur = Math.max(ne - dubDrag.origStart, 0.2);
+                    const newRatio = clamp(report.tts_duration / newDur, 0.5, 2.5);
+                    patchDubSegment({
+                      end: Number(ne.toFixed(2)),
+                      target_duration: Number(newDur.toFixed(3)),
+                      applied_ratio: Number(newRatio.toFixed(2)),
+                      clamped: newRatio > 1.35,
+                      overflow_s: 0,
+                    });
+                  }
+                };
+
+                const finishDubDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+                  if (!dubDrag || dubDrag.index !== report.index) return;
+                  e.stopPropagation();
+                  const wasMoved = dubDrag.moved;
+                  setDubDrag(null);
+                  if (!wasMoved) {
+                    update({ selected: report.index });
+                    setPlayhead(report.start, { seek: true });
+                    return;
+                  }
+                  const curDub = useEditor.getState().dub;
+                  if (curDub && curDub.segments.length > 0 && curDub.segments.every((r) => Boolean(r.clip_path))) {
+                    const totalDur = Math.max(
+                      duration,
+                      ...curDub.segments.map((r) => r.end),
+                      0.5,
+                    );
+                    void remixDub(curDub.segments, totalDur)
+                      .then((res) => {
+                        useEditor.setState((cur) =>
+                          cur.dub
+                            ? { dub: { ...cur.dub, track_path: res.track_path, duration: res.duration } }
+                            : {},
+                        );
+                      })
+                      .catch(() => null);
+                  }
+                };
+
                 return (
                   <div
                     key={report.index}
                     data-clip
-                    className={`absolute inset-y-1.5 flex items-center overflow-hidden rounded border px-1 text-[9px] text-white/90 ${
-                      report.clamped
-                        ? "border-rose-400/70 bg-track-dubbed/70 ring-1 ring-rose-400/40"
-                        : "border-track-dubbed bg-track-dubbed/70"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      update({ selected: report.index });
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                      setDubDrag({
+                        index: report.index,
+                        mode: "move",
+                        startClientX: e.clientX,
+                        origStart: report.start,
+                        origEnd: report.end,
+                        moved: false,
+                      });
+                    }}
+                    onPointerMove={handleDubMove}
+                    onPointerUp={finishDubDrag}
+                    onPointerCancel={() => setDubDrag(null)}
+                    className={`group absolute inset-y-1.5 flex cursor-grab items-center overflow-hidden rounded border px-1.5 text-[9px] text-white/90 select-none touch-none ${
+                      isSelected
+                        ? "border-brand bg-track-dubbed ring-1 ring-brand"
+                        : report.clamped
+                          ? "border-rose-400/70 bg-track-dubbed/70 ring-1 ring-rose-400/40"
+                          : "border-track-dubbed bg-track-dubbed/70 hover:bg-track-dubbed"
                     }`}
                     style={{ left: report.start * pps, width }}
                     title={`#${report.index} · TTS ${report.tts_duration.toFixed(2)}s → ${report.target_duration.toFixed(2)}s · ${report.applied_ratio.toFixed(2)}×${
                       report.overflow_s > 0 ? ` · cắt ${report.overflow_s.toFixed(2)}s` : ""
-                    }`}
+                    }\n(Kéo để dịch vị trí câu đọc, kéo 2 mép để co giãn tốc độ đọc)`}
                   >
+                    <div
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        update({ selected: report.index });
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                        setDubDrag({
+                          index: report.index,
+                          mode: "start",
+                          startClientX: e.clientX,
+                          origStart: report.start,
+                          origEnd: report.end,
+                          moved: true,
+                        });
+                      }}
+                      onPointerMove={handleDubMove}
+                      onPointerUp={finishDubDrag}
+                      onPointerCancel={() => setDubDrag(null)}
+                      className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize bg-white/0 hover:bg-white/40"
+                    />
                     <span className="truncate">{report.clamped ? "⚠ " : ""}{report.applied_ratio.toFixed(2)}×</span>
+                    <div
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        update({ selected: report.index });
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                        setDubDrag({
+                          index: report.index,
+                          mode: "end",
+                          startClientX: e.clientX,
+                          origStart: report.start,
+                          origEnd: report.end,
+                          moved: true,
+                        });
+                      }}
+                      onPointerMove={handleDubMove}
+                      onPointerUp={finishDubDrag}
+                      onPointerCancel={() => setDubDrag(null)}
+                      className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize bg-white/0 hover:bg-white/40"
+                    />
                   </div>
                 );
               })}

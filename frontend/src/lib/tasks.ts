@@ -184,6 +184,39 @@ function remapItems<T extends { start: number; end: number }>(
   return out;
 }
 
+function remapAndRemixDub(
+  dub: ReturnType<typeof store>["dub"],
+  mode: "trim_left" | "trim_right" | "delete_range",
+  start: number,
+  end: number,
+  newDur: number,
+) {
+  if (!dub) return null;
+  const nextReports = remapItems(dub.segments, mode, start, end).map((r, idx) => ({
+    ...r,
+    index: idx + 1,
+  }));
+  const updatedDub = {
+    ...dub,
+    duration: Math.max(newDur, 0.5),
+    segments: nextReports,
+  };
+  if (nextReports.length > 0 && nextReports.every((r) => Boolean(r.clip_path))) {
+    void remixDub(nextReports, Math.max(newDur, 0.5))
+      .then((res) => {
+        useEditor.setState((cur) =>
+          cur.dub
+            ? {
+                dub: { ...cur.dub, track_path: res.track_path, duration: res.duration },
+              }
+            : {},
+        );
+      })
+      .catch(() => null);
+  }
+  return updatedDub;
+}
+
 export async function runTimelineCut(
   mode: "trim_left" | "trim_right" | "delete_range",
   customTime?: number,
@@ -222,6 +255,7 @@ export async function runTimelineCut(
     segments: state.segments,
     secondarySegments: state.secondarySegments,
     layers: state.layers,
+    dub: state.dub,
   };
   const nextSegs = remapItems(state.segments, mode, start, end).map((s, idx) => ({
     ...s,
@@ -232,6 +266,7 @@ export async function runTimelineCut(
     index: idx + 1,
   }));
   const nextLayers = remapItems(state.layers, mode, start, end);
+  const nextDub = remapAndRemixDub(state.dub, mode, start, end, newDur);
   const nextPlayhead = mode === "delete_range" ? Math.min(start, newDur) : 0;
 
   useEditor.setState((prev) => ({
@@ -239,8 +274,9 @@ export async function runTimelineCut(
     segments: nextSegs,
     secondarySegments: nextSecondary,
     layers: nextLayers,
+    dub: nextDub,
     selectionRange: null,
-    dubDirty: Boolean(prev.dub),
+    dubDirty: false,
     playhead: nextPlayhead,
     selected: nextSegs[0]?.index ?? null,
     projectDirty: true,
@@ -253,7 +289,7 @@ export async function runTimelineCut(
       : mode === "trim_right"
         ? `Cắt phải (${end.toFixed(1)}s)`
         : `Xóa đoạn ${start.toFixed(1)}s–${end.toFixed(1)}s`;
-  state.pushLog("success", `${label} → thời lượng timeline ${newDur.toFixed(2)}s (chưa render lại)`);
+  state.pushLog("success", `${label} → thời lượng timeline ${newDur.toFixed(2)}s (đã đồng bộ sub & lồng tiếng)`);
 }
 
 export function splitTimelineClip(atTime?: number): void {
@@ -270,6 +306,7 @@ export function splitTimelineClip(atTime?: number): void {
     segments: state.segments,
     secondarySegments: state.secondarySegments,
     layers: state.layers,
+    dub: state.dub,
   };
   useEditor.setState((prev) => ({
     videoClips: nextClips,
@@ -292,6 +329,7 @@ export function deleteTimelineClip(clipId: string): void {
     segments: state.segments,
     secondarySegments: state.secondarySegments,
     layers: state.layers,
+    dub: state.dub,
   };
   const nextClips = state.videoClips.filter((c) => c.id !== clipId);
   const nextSegs = remapItems(state.segments, "delete_range", bound.start, bound.end).map((s, idx) => ({
@@ -303,6 +341,7 @@ export function deleteTimelineClip(clipId: string): void {
   );
   const nextLayers = remapItems(state.layers, "delete_range", bound.start, bound.end);
   const newDur = timelineDuration(nextClips);
+  const nextDub = remapAndRemixDub(state.dub, "delete_range", bound.start, bound.end, newDur);
   const nextPlayhead = Math.min(bound.start, newDur);
 
   useEditor.setState((prev) => ({
@@ -311,7 +350,8 @@ export function deleteTimelineClip(clipId: string): void {
     segments: nextSegs,
     secondarySegments: nextSecondary,
     layers: nextLayers,
-    dubDirty: Boolean(prev.dub),
+    dub: nextDub,
+    dubDirty: false,
     playhead: nextPlayhead,
     projectDirty: true,
     cutUndoStack: [...prev.cutUndoStack.slice(-9), snapshot],
@@ -334,6 +374,7 @@ export function trimClipEdge(clipId: string, side: "left" | "right", newSourceTi
     segments: state.segments,
     secondarySegments: state.secondarySegments,
     layers: state.layers,
+    dub: state.dub,
   };
   const nextClips = state.videoClips.map((c) => {
     if (c.id !== clipId) return c;
@@ -341,10 +382,12 @@ export function trimClipEdge(clipId: string, side: "left" | "right", newSourceTi
       ? { ...c, source_start: Number(newSourceTime.toFixed(3)) }
       : { ...c, source_end: Number(newSourceTime.toFixed(3)) };
   });
+  const newDur = timelineDuration(nextClips);
 
   let nextSegs = state.segments;
   let nextSecondary = state.secondarySegments;
   let nextLayers = state.layers;
+  let nextDub = state.dub;
   if (side === "left" && newSourceTime > oldStart) {
     const cutTo = bound.start + (newSourceTime - oldStart);
     nextSegs = remapItems(state.segments, "delete_range", bound.start, cutTo).map((s, i) => ({
@@ -356,6 +399,7 @@ export function trimClipEdge(clipId: string, side: "left" | "right", newSourceTi
       index: i + 1,
     }));
     nextLayers = remapItems(state.layers, "delete_range", bound.start, cutTo);
+    nextDub = remapAndRemixDub(state.dub, "delete_range", bound.start, cutTo, newDur);
   } else if (side === "right" && newSourceTime < oldEnd) {
     const cutFrom = bound.start + (newSourceTime - oldStart);
     nextSegs = remapItems(state.segments, "delete_range", cutFrom, bound.end).map((s, i) => ({
@@ -367,6 +411,7 @@ export function trimClipEdge(clipId: string, side: "left" | "right", newSourceTi
       index: i + 1,
     }));
     nextLayers = remapItems(state.layers, "delete_range", cutFrom, bound.end);
+    nextDub = remapAndRemixDub(state.dub, "delete_range", cutFrom, bound.end, newDur);
   }
 
   useEditor.setState((prev) => ({
@@ -374,7 +419,8 @@ export function trimClipEdge(clipId: string, side: "left" | "right", newSourceTi
     segments: nextSegs,
     secondarySegments: nextSecondary,
     layers: nextLayers,
-    dubDirty: Boolean(prev.dub),
+    dub: nextDub,
+    dubDirty: false,
     projectDirty: true,
     cutUndoStack: [...prev.cutUndoStack.slice(-9), snapshot],
   }));
@@ -384,17 +430,29 @@ export function undoTimelineCut(): void {
   const state = store();
   const prev = state.cutUndoStack[state.cutUndoStack.length - 1];
   if (!prev) return;
+  const restoredDub = prev.dub ?? state.dub;
   useEditor.setState((curr) => ({
     videoClips: prev.videoClips,
     segments: prev.segments,
     secondarySegments: prev.secondarySegments,
     layers: prev.layers,
+    dub: restoredDub,
     selectionRange: null,
-    dubDirty: Boolean(curr.dub),
+    dubDirty: false,
     playhead: 0,
     selected: prev.segments[0]?.index ?? null,
     cutUndoStack: curr.cutUndoStack.slice(0, -1),
   }));
+  if (restoredDub && restoredDub.segments.length > 0 && restoredDub.segments.every((r) => Boolean(r.clip_path))) {
+    const restoredDur = Math.max(timelineDuration(prev.videoClips), 0.5);
+    void remixDub(restoredDub.segments, restoredDur)
+      .then((res) => {
+        useEditor.setState((cur) =>
+          cur.dub ? { dub: { ...cur.dub, track_path: res.track_path, duration: res.duration } } : {},
+        );
+      })
+      .catch(() => null);
+  }
   player.seek(0);
   state.pushLog("info", "Đã hoàn tác thao tác cắt trên Timeline.");
 }
@@ -468,11 +526,22 @@ export async function runAnalyzeContext(): Promise<void> {
       provider: state.translateProvider,
       preset: state.translatePreset,
     });
+    const normalized = {
+      ...result,
+      summary: result.summary ?? "",
+      characters: Array.isArray(result.characters) ? result.characters : [],
+      pronoun_rules: Array.isArray(result.pronoun_rules) ? result.pronoun_rules : [],
+      term_glossary: Array.isArray(result.term_glossary) ? result.term_glossary : [],
+      context_guidance: result.context_guidance ?? result.context ?? "",
+    };
     state.update({
-      contextResult: result,
-      contextGuidance: result.context_guidance || state.contextGuidance,
+      contextResult: normalized,
+      contextGuidance: normalized.context_guidance || state.contextGuidance,
     });
-    state.pushLog("success", `Đã phân tích ${result.characters.length} nhân vật & quy tắc xưng hô.`);
+    state.pushLog(
+      "success",
+      `Đã phân tích ${normalized.characters.length} nhân vật & quy tắc xưng hô.`,
+    );
   } catch (error) {
     state.pushLog("error", `Phân tích ngữ cảnh thất bại: ${message(error)}`);
   } finally {
@@ -604,7 +673,7 @@ export async function runExport(): Promise<void> {
   try {
     let subtitlePath: string | null = null;
     if (state.segments.length && state.presentationMode !== "none") {
-      const assPath = joinPath(directoryOf(output), `${stem(output)}.ass`);
+      const assPath = joinPath(directoryOf(output), `.${stem(output)}_burn.ass`);
       const ass = await exportSubtitles({
         segments: state.segments,
         output_path: assPath,

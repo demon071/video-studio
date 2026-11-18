@@ -65,6 +65,7 @@ export const ENDPOINTS = {
   queueStop: "/api/queue/stop",
   queueClearCompleted: "/api/queue/clear-completed",
   queueItem: (id: string) => `/api/queue/${encodeURIComponent(id)}`,
+  queueItemSave: (id: string) => `/api/queue/${encodeURIComponent(id)}/save`,
   queueItemClean: (id: string) => `/api/queue/${encodeURIComponent(id)}/clean`,
   projectSave: "/api/project/save",
   projectOpen: "/api/project/open",

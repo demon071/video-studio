@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronsRight, History, Loader2, Plus, RotateCw, ScanText, Trash2, Volume2 } from "lucide-react";
+import { ChevronLeft, ChevronsRight, History, Loader2, Merge, Plus, RotateCw, ScanText, Split, Trash2, Volume2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { CueReadingDialog } from "@/components/subtitles/CueReadingDialog";
@@ -88,6 +88,65 @@ export function SubtitleTable() {
       translation: "",
     };
     update({ segments: [...segments, next].sort((a, b) => a.start - b.start), selected: next.index });
+  };
+
+  const splitWordsHalf = (str: string): [string, string] => {
+    const words = str.trim().split(/\s+/).filter(Boolean);
+    if (words.length <= 1) return [str.trim(), ""];
+    const half = Math.ceil(words.length / 2);
+    return [words.slice(0, half).join(" "), words.slice(half).join(" ")];
+  };
+
+  const mergeWithNext = (index: number) => {
+    const pos = segments.findIndex((s) => s.index === index);
+    if (pos === -1 || pos + 1 >= segments.length) return;
+    const cur = segments[pos];
+    const nxt = segments[pos + 1];
+    const mergedSeg: SubtitleSegment = {
+      ...cur,
+      end: Math.max(cur.end, nxt.end),
+      text: [cur.text.trim(), nxt.text.trim()].filter(Boolean).join(" "),
+      translation: [cur.translation?.trim(), nxt.translation?.trim()].filter(Boolean).join(" "),
+    };
+    const nextList = [
+      ...segments.slice(0, pos),
+      mergedSeg,
+      ...segments.slice(pos + 2),
+    ].map((s, idx) => ({ ...s, index: idx + 1 }));
+    update({
+      segments: nextList,
+      selected: pos + 1,
+      dubDirty: dub !== null,
+      projectDirty: true,
+    });
+  };
+
+  const splitSegment = (index: number) => {
+    const pos = segments.findIndex((s) => s.index === index);
+    if (pos === -1) return;
+    const cur = segments[pos];
+    if (cur.end - cur.start < 0.3) return;
+    const ph = useEditor.getState().playhead;
+    const cutAt =
+      ph > cur.start + 0.15 && ph < cur.end - 0.15
+        ? Number(ph.toFixed(2))
+        : Number(((cur.start + cur.end) / 2).toFixed(2));
+    const [textA, textB] = splitWordsHalf(cur.text || "");
+    const [trA, trB] = splitWordsHalf(cur.translation || "");
+    const first: SubtitleSegment = { ...cur, end: cutAt, text: textA, translation: trA };
+    const second: SubtitleSegment = { ...cur, start: cutAt, text: textB, translation: trB };
+    const nextList = [
+      ...segments.slice(0, pos),
+      first,
+      second,
+      ...segments.slice(pos + 1),
+    ].map((s, idx) => ({ ...s, index: idx + 1 }));
+    update({
+      segments: nextList,
+      selected: pos + 1,
+      dubDirty: dub !== null,
+      projectDirty: true,
+    });
   };
 
   if (collapsed) {
@@ -192,15 +251,13 @@ export function SubtitleTable() {
                 update({ selected: segment.index });
               }}
               onDoubleClick={() => setPlayhead(segment.start, { seek: true })}
-              className={`border-b border-border/60 px-2.5 py-1.5 transition-colors ${
-                isActive ? "bg-brand/10" : isSelected ? "bg-surface-3/60" : "hover:bg-surface-2/60"
-              }`}
+              className={`border-b border-border/60 px-2.5 py-1.5 transition-colors ${isActive ? "bg-brand/10" : isSelected ? "bg-surface-3/60" : "hover:bg-surface-2/60"
+                }`}
             >
               <div className="flex items-center gap-1">
                 <button
-                  className={`w-5 shrink-0 text-left font-mono text-[10px] ${
-                    isActive ? "text-brand" : "text-slate-500"
-                  } hover:text-brand`}
+                  className={`w-5 shrink-0 text-left font-mono text-[10px] ${isActive ? "text-brand" : "text-slate-500"
+                    } hover:text-brand`}
                   title="Tua tới dòng này"
                   onClick={() => {
                     update({ selected: segment.index });
@@ -261,11 +318,10 @@ export function SubtitleTable() {
                 </button>
 
                 <button
-                  className={`shrink-0 disabled:cursor-not-allowed disabled:opacity-40 ${
-                    stale.has(segment.index)
+                  className={`shrink-0 disabled:cursor-not-allowed disabled:opacity-40 ${stale.has(segment.index)
                       ? "text-amber-300 hover:text-amber-200"
                       : "text-slate-600 hover:text-emerald-300"
-                  }`}
+                    }`}
                   title={
                     !dub
                       ? "Cần lồng tiếng cả video trước khi tạo lại từng dòng"
@@ -293,6 +349,24 @@ export function SubtitleTable() {
                   }}
                 >
                   <ScanText size={11} />
+                </button>
+
+                <button
+                  className="shrink-0 text-slate-600 hover:text-sky-300 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Tách đôi dòng này (tại vị trí playhead hoặc chính giữa)"
+                  disabled={segment.end - segment.start < 0.3}
+                  onClick={() => splitSegment(segment.index)}
+                >
+                  <Split size={11} />
+                </button>
+
+                <button
+                  className="shrink-0 text-slate-600 hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Gộp dòng này với dòng kế tiếp"
+                  disabled={segment.index === segments[segments.length - 1]?.index}
+                  onClick={() => mergeWithNext(segment.index)}
+                >
+                  <Merge size={11} />
                 </button>
 
                 <button

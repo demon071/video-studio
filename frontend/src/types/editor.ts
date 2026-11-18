@@ -59,6 +59,7 @@ export interface ContextCharacter {
 }
 
 export interface ContextAnalyzeResult {
+  context?: string;
   summary: string;
   characters: ContextCharacter[];
   pronoun_rules: Array<Record<string, string>>;
@@ -234,6 +235,7 @@ export interface QueuePreviewResult {
   video_path: string;
   segments: SubtitleSegment[];
   dub: DubbingResult | null;
+  editor_state?: Record<string, unknown>;
 }
 
 export interface QueueSnapshot {
@@ -465,6 +467,17 @@ export interface ProjectFile {
   dub: DubbingResult | null;
   /** Caption look, so a reopened project burns in the same subtitles. */
   subtitle_style?: SubtitleStyle;
+  presentation_mode?: SubtitlePresentationMode;
+  secondary_segments?: SubtitleSegment[];
+  secondary_style?: SubtitleStyle;
+  layers?: VisualLayer[];
+  video_clips?: Array<{ id?: string; name?: string; source_start: number; source_end: number }>;
+  background_audio_path?: string | null;
+  voice_gain?: number;
+  flip_horizontal?: boolean;
+  speaker_voices?: Record<string, string>;
+  quality_profile?: QualityProfile;
+  use_nvenc?: boolean;
   settings: ProjectSettings;
   view: ProjectView;
 }

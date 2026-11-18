@@ -11,7 +11,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.schemas.subtitle import DubbingResult, SubtitleSegment, SubtitleStyle
+from app.schemas.subtitle import (
+    DubbingResult,
+    SubtitleSegment,
+    SubtitleStyle,
+    VideoClipRange,
+    VisualLayer,
+)
 
 PROJECT_FORMAT = "shortvideoai-project"
 PROJECT_VERSION = 1
@@ -74,6 +80,17 @@ class ProjectFile(BaseModel):
         default_factory=SubtitleStyle,
         description="Caption look, so a reopened project burns in the same subtitles",
     )
+    presentation_mode: Literal["single", "bilingual", "none"] = "single"
+    secondary_segments: list[SubtitleSegment] = Field(default_factory=list)
+    secondary_style: SubtitleStyle = Field(default_factory=SubtitleStyle)
+    layers: list[VisualLayer] = Field(default_factory=list)
+    video_clips: list[VideoClipRange] = Field(default_factory=list)
+    background_audio_path: str | None = None
+    voice_gain: float = Field(default=1.0, ge=0.0, le=3.0)
+    flip_horizontal: bool = False
+    speaker_voices: dict[str, str] = Field(default_factory=dict)
+    quality_profile: Literal["high", "balanced", "low"] = "high"
+    use_nvenc: bool = False
     settings: ProjectSettings = Field(default_factory=ProjectSettings)
     view: ProjectView = Field(default_factory=ProjectView)
 

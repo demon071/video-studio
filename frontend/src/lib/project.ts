@@ -11,7 +11,7 @@
  *
  * Both go through `buildProject`, so the document is identical either way.
  */
-import { getSession, openProject, putSession, putSessionNow, saveProject } from "@/lib/api";
+import { getSession, openProject, putSession, putSessionNow, saveProject, saveQueueItemState } from "@/lib/api";
 import {
   baseName,
   isDesktop,
@@ -89,6 +89,17 @@ export function buildProject(state: Snapshot = store()): ProjectFile {
     segments: state.segments,
     dub: state.dub,
     subtitle_style: state.subtitleStyle,
+    presentation_mode: state.presentationMode,
+    secondary_segments: state.secondarySegments,
+    secondary_style: state.secondaryStyle,
+    layers: state.layers,
+    video_clips: state.videoClips,
+    background_audio_path: state.backgroundAudioPath,
+    voice_gain: state.voiceGain,
+    flip_horizontal: state.flipHorizontal,
+    speaker_voices: state.speakerVoices,
+    quality_profile: state.qualityProfile,
+    use_nvenc: state.useNvenc,
     settings: {
       stt_provider: state.sttProvider,
       whisper_size: state.whisperSize,
@@ -158,14 +169,36 @@ export async function applyProject(
   const ttsProvider = asTtsProvider(settings.tts_provider);
   const configuredVoice = settings.ttsVoice;
 
+  const hydratedSource = await clipFrom(document.source, missing);
+  const hydratedClips =
+    Array.isArray(document.video_clips) && document.video_clips.length > 0
+      ? document.video_clips.map((c, idx) => ({
+          id: c.id || `clip_${idx}`,
+          name: c.name || hydratedSource?.name || `Clip ${idx + 1}`,
+          source_start: Number(c.source_start) || 0,
+          source_end: Number(c.source_end) || (hydratedSource?.duration ?? 1),
+        }))
+      : undefined;
+
   state.hydrate({
-    source: await clipFrom(document.source, missing),
+    source: hydratedSource,
     aspect: asAspect(document.aspect, "9:16"),
     segments: document.segments ?? [],
     // A dub track that vanished (temp was cleaned before the project store
     // adopted it) is dropped instead of pointing the render at a dead path.
     dub: document.dub && !missing.includes("dub") ? document.dub : null,
     subtitleStyle: document.subtitle_style,
+    presentationMode: document.presentation_mode,
+    secondarySegments: document.secondary_segments,
+    secondaryStyle: document.secondary_style,
+    layers: document.layers,
+    videoClips: hydratedClips,
+    backgroundAudioPath: document.background_audio_path ?? null,
+    voiceGain: document.voice_gain,
+    flipHorizontal: document.flip_horizontal,
+    speakerVoices: document.speaker_voices,
+    qualityProfile: document.quality_profile,
+    useNvenc: document.use_nvenc,
     playhead: document.view?.playhead ?? 0,
     previewSubtitles: document.view?.preview_subtitles ?? true,
     previewDub: document.view?.preview_dub ?? true,
@@ -212,10 +245,51 @@ export async function applyProject(
 /* ---------------------------------------------------------------------------
  * Save
  * ------------------------------------------------------------------------ */
+export async function syncActiveQueueItem(options: { notify?: boolean } = {}) {
+  const state = store();
+  const itemId = state.activeQueueItemId;
+  if (!itemId) return null;
+  const snap = await saveQueueItemState(itemId, {
+    segments: state.segments,
+    dub: state.dub,
+    dub_dirty: state.dubDirty,
+    aspect: state.aspect,
+    subtitle_style: state.subtitleStyle,
+    presentation_mode: state.presentationMode,
+    secondary_segments: state.secondarySegments,
+    secondary_style: state.secondaryStyle,
+    layers: state.layers,
+    video_clips: state.videoClips,
+    background_path: state.backgroundAudioPath,
+    keep_original_audio: state.keepOriginalAudio,
+    voice_gain: state.voiceGain,
+    background_gain: state.duckGain,
+    flip_horizontal: state.flipHorizontal,
+  });
+  state.update({ projectDirty: false });
+  if (options.notify) {
+    state.pushLog("success", `Đã lưu chỉnh sửa (${state.segments.length} dòng) vào mục Hàng đợi.`);
+  }
+  return snap;
+}
+
 export async function saveCurrentProject(options: { as?: boolean } = {}): Promise<void> {
   const state = store();
   if (!hasWork(state)) {
     state.pushLog("warn", "Chưa có nội dung để lưu.");
+    return;
+  }
+
+  if (state.activeQueueItemId && !options.as && !state.projectPath) {
+    state.beginTask("project");
+    try {
+      await syncActiveQueueItem({ notify: true });
+      void persistSession();
+    } catch (error) {
+      state.pushLog("error", `Lưu vào Hàng đợi thất bại: ${message(error)}`);
+    } finally {
+      state.endTask("project");
+    }
     return;
   }
 

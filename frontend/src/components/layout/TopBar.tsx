@@ -30,6 +30,7 @@ export function TopBar() {
   const projectName = useEditor((state) => state.projectName);
   const projectPath = useEditor((state) => state.projectPath);
   const projectDirty = useEditor((state) => state.projectDirty);
+  const activeQueueItemId = useEditor((state) => state.activeQueueItemId);
   const segmentCount = useEditor((state) => state.segments.length);
   const qualityProfile = useEditor((state) => state.qualityProfile);
   const useNvenc = useEditor((state) => state.useNvenc);
@@ -75,7 +76,7 @@ export function TopBar() {
       >
         {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
         Lưu
-        {projectDirty && projectPath && (
+        {projectDirty && (projectPath || activeQueueItemId) && (
           <span className="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-400" title="Có thay đổi chưa lưu" />
         )}
       </button>

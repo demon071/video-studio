@@ -94,13 +94,23 @@ SYSTEM_PROMPT = (
     "left in the source language, not even a short one-line greeting, and never a copy "
     "of the source characters. A line that is only a person's name or a two-word "
     "exclamation is still a line: answer it, do not skip it.\n"
-    "2. Translate faithfully, keeping the spoken tone, humour and emotion of the original.\n"
-    "3. Keep every line short enough to be read in the time it is on screen (about "
-    "15 characters per second); prefer natural spoken language over literal wording.\n"
+    "2. Translation contract (Fidelity & Completeness FIRST): Translate every meaningful "
+    "cue faithfully and completely. Preserve source meaning, event order, speaker intent, "
+    "humour, emotion and significant emphasis. Do NOT omit, summarize, sanitize, intensify "
+    "or add information not in the source.\n"
+    "3. Context reasoning for fragmented ASR/OCR cues: Individual subtitle lines are often "
+    "incomplete sentence fragments split across consecutive cues (e.g. one cue holds the "
+    "subject or time phrase and the next holds the verb/object). Read the entire batch scene "
+    "before translating any cue; use nearby cues and any literal reference drafts to resolve "
+    "ellipsis, idioms, pronouns, names and relationships accurately, while keeping each cue's "
+    "own translation short enough to be read in the time it is on screen (about "
+    "15 characters per second); prefer natural spoken language over mechanical word-by-word wording, "
+    "but NEVER drop or alter source facts to shorten a line.\n"
     "4. Never merge, split or drop lines. Exactly one output entry per input id, the ids "
     "must be copied unchanged from the input, and two different lines must never share "
     "the same translation.\n"
-    "5. Keep numbers, proper nouns, brand names and emojis unchanged.\n"
+    "5. Source facts are strict: keep numbers, proper nouns, brand names, gendered pronouns "
+    "(e.g. Chinese 他 vs 她) and emojis accurate; never invent events or relationships.\n"
     '6. Answer with STRICT JSON only: {"lines":[{"i":<id>,"t":"<translated text>"}]}\n'
     "7. Do not add explanations, markdown fences or the source text."
 )
@@ -139,12 +149,16 @@ def _language_name(code: str) -> str:
 # (`prompts/presets/zh_short_drama.md`, `subtitle_translation.system.md`).
 _VIETNAMESE_RULES = (
     "Address forms (xưng hô): decide who is speaking to whom, then keep ONE pair "
-    "per relationship for the whole batch (anh - em, chị - em, mày - tao, tôi - "
-    "cậu, sếp - em). Never default close dialogue to 'tôi - bạn', and never use an "
-    "affectionate 'em' for someone threatening or confronting the speaker.\n"
-    "Names: one spelling per character across every line. Write Chinese, Japanese "
-    "or Korean names in their standard Vietnamese (Hán-Việt) form (顾总 -> Cố "
-    "tổng, 林浅 -> Lâm Thiển); never leave pinyin and never invent a name."
+    "per relationship for the whole batch (modern: anh - em, chị - em, mày - tao, "
+    "tôi - cậu/cô/anh, sếp - em; historical/costume: ta - nàng/ngươi, chàng - thiếp, "
+    "phu quân - nương tử, công tử/lão gia/phu nhân/tiểu thư, bổn vương/bệ hạ - thần/nô tỳ). "
+    "Never default close dialogue to 'tôi - bạn', and never use an affectionate 'em' "
+    "for someone threatening or confronting the speaker.\n"
+    "Names & Sino-Vietnamese terms: one spelling per character across every line. Write "
+    "Chinese personal names, titles and historical idioms in their standard Vietnamese "
+    "(Hán-Việt) or natural Vietnamese form (顾总 -> Cố tổng, 顾渊 -> Cố Uyên, 林浅 -> Lâm Thiển, "
+    "夫人 -> phu nhân, 官家 -> quan gia, 结为夫妻 -> kết làm phu thê / nên duyên vợ chồng); "
+    "never leave pinyin and never invent a name."
 )
 
 _STYLE_MARKERS: dict[str, tuple[str, ...]] = {
@@ -219,12 +233,39 @@ def load_preset_rules(preset_id: str | None) -> str:
     return "\n".join(rule_lines).strip()
 
 
+_HISTORICAL_MARKERS = (
+    "夫人", "老爷", "公子", "小姐", "姑娘", "少爷", "陛下", "本王", "本宫", "娘子", "夫君",
+    "奴婢", "属下", "官家", "大人", "师父", "掌门", "江湖", "宗门", "长老", "殿下", "皇上",
+)
+_DRAMA_MARKERS = (
+    "顾总", "霍总", "傅总", "陆总", "沈总", "林总", "学长", "学姐", "豪门", "离婚", "结婚",
+    "前夫", "前妻", "现男友", "前男友", "总裁", "董事长", "战神", "赘婿",
+)
+
+
+def _infer_preset(preset: str | None, segments: list[SubtitleSegment], source_language: str = "auto") -> str | None:
+    """Auto-select CapCap's historical or short-drama preset when ``general_default`` is used on Chinese cues."""
+    if preset and preset != "general_default":
+        return preset
+    sample_text = " ".join(seg.text for seg in segments[:80] if seg.text)
+    if not sample_text or (_language_name(source_language) not in {"Chinese", "the source language"} and not _HAN_RE.search(sample_text)):
+        return preset
+    hist_hits = sum(1 for marker in _HISTORICAL_MARKERS if marker in sample_text)
+    drama_hits = sum(1 for marker in _DRAMA_MARKERS if marker in sample_text)
+    if hist_hits >= 2 and hist_hits >= drama_hits:
+        return "zh_wuxia_xianxia"
+    if drama_hits >= 1 or _HAN_RE.search(sample_text):
+        return "zh_short_drama"
+    return preset
+
+
 class RollingContextLedger:
     """Sequential batch pronoun & relationship ledger (ported from CapCap context_analyzer.py)."""
 
     def __init__(self, base_context: str = "") -> None:
         self.base_context: str = str(base_context or "").strip()
         self.confirmed_rules: list[str] = []
+        self.preceding_cues: list[tuple[str, str]] = []
         self._seen_signatures: set[str] = set()
 
     def add_confirmed_rule(self, rule: str) -> None:
@@ -236,15 +277,31 @@ class RollingContextLedger:
             self._seen_signatures.add(sig)
             self.confirmed_rules.append(clean)
 
+    def set_preceding_cues(self, cues: list[tuple[str, str]]) -> None:
+        self.preceding_cues = [
+            (str(s).strip(), str(t).strip())
+            for s, t in cues
+            if str(s).strip() or str(t).strip()
+        ]
+
 
 def update_ledger_from_batch(
     ledger: RollingContextLedger,
     source_batch: list[str],
     translated_batch: list[str],
 ) -> None:
-    """Extract and reinforce confirmed relationship and pronoun rules after a batch (ported from CapCap)."""
+    """Extract and reinforce confirmed relationship, pronoun rules, and boundary cues after a batch (ported from CapCap)."""
     if not source_batch or not translated_batch:
         return
+
+    pairs = [
+        (s.strip(), t.strip())
+        for s, t in zip(source_batch, translated_batch)
+        if s.strip() and t.strip()
+    ]
+    if pairs:
+        ledger.set_preceding_cues(pairs[-4:])
+
     combined_src = " ".join(source_batch)
     combined_trn = " ".join(translated_batch)
     trn_lower = combined_trn.lower()
@@ -276,7 +333,12 @@ def update_ledger_from_batch(
     if ("老板" in combined_src or "总" in combined_src) and ("sếp" in trn_lower or "giám đốc" in trn_lower):
         ledger.add_confirmed_rule("老板 / ...总 (Lãnh đạo / Sếp) -> Xưng hô bắt buộc: 'sếp' / 'giám đốc'")
 
-    distinctive = ("em", "tao", "mày", "con", "cháu")
+    if any(k in combined_src for k in ("夫人", "公子", "老爷", "少爷", "姑娘", "娘子", "夫君", "官家")):
+        ledger.add_confirmed_rule(
+            "Bối cảnh cổ trang / gia tộc (夫人/公子/官家/夫妻) -> Giữ xưng hô cổ trang nhất quán: 'ta - nàng/chàng/phu nhân/công tử', 'thiếp - chàng/phu quân', 'nô tỳ/thuộc hạ'."
+        )
+
+    distinctive = ("em", "tao", "mày", "con", "cháu", "ta", "nàng", "thiếp", "chàng")
     counts = Counter(w for w in trn_lower.split() if w in distinctive)
     dominant = counts.most_common(1)
     if dominant and dominant[0][1] >= 3:
@@ -286,7 +348,10 @@ def update_ledger_from_batch(
         )
 
 
-def build_rolling_context_guidance(ledger: RollingContextLedger) -> str:
+def build_rolling_context_guidance(
+    ledger: RollingContextLedger,
+    preceding_cues: list[tuple[str, str]] | None = None,
+) -> str:
     sections: list[str] = []
     if ledger.base_context:
         sections.append(ledger.base_context)
@@ -296,6 +361,18 @@ def build_rolling_context_guidance(ledger: RollingContextLedger) -> str:
             "### Confirmed Address Memory from Preceding Batches (Xưng hô đã xác lập):\n"
             f"{rules_text}\n"
             "CRITICAL: Maintain strict pronoun continuity with these established character address forms."
+        )
+    cues_to_use = preceding_cues if preceding_cues is not None else ledger.preceding_cues
+    if cues_to_use:
+        cues_block = "\n".join(
+            f'[{i}] Source: "{src}" -> Translated: "{trn}"'
+            for i, (src, trn) in enumerate(cues_to_use, 1)
+        )
+        sections.append(
+            "### Preceding Dialogue Context (Các câu thoại liền trước - dùng để nối câu bị ngắt dòng và giữ đúng mạch xưng hô):\n"
+            f"{cues_block}\n"
+            "CRITICAL INSTRUCTION FOR CONTEXT: The above preceding cues are for narrative continuity and split-sentence context ONLY. "
+            "Do NOT re-translate or include them in your JSON output. Translate ONLY the input lines requested in the user prompt."
         )
     return "\n\n".join(sections).strip()
 
@@ -422,11 +499,20 @@ def _user_prompt(
     style: str,
 ) -> str:
     payload = [
-        {"i": segment.index, "t": segment.text, "d": round(segment.duration, 2)}
+        {
+            "i": segment.index,
+            "t": segment.text,
+            "d": round(segment.duration, 2),
+            **({"s": segment.speaker} if segment.speaker else {}),
+        }
         for segment in chunk
     ]
     target_name = _language_name(target)
-    budget = 'Each line carries "d", its on-screen length in seconds: keep the translation short enough to read in it.'
+    budget = (
+        'Each line carries "d", its on-screen length in seconds: keep the translation '
+        "short enough to read in it, but translate the full meaning of every cue "
+        "faithfully without omitting any facts or names."
+    )
     return (
         f"Source language: {_language_name(source)}\n"
         f"Target language: {target_name} ({target})\n"
@@ -1055,6 +1141,55 @@ def _translate_web(
     return TranslationOutcome(provider=provider, model=model_name, segments=translated, failed_chunks=failed)
 
 
+def clean_dialogue_context(text: str) -> str:
+    """Clean up LaTeX math symbols like $\\leftrightarrow$ or $\\rightarrow$ that LLMs sometimes generate."""
+    if not text:
+        return ""
+    replacements = [
+        (r"\$\s*\\(?:long)?leftrightarrow\s*\$", " ↔ "),
+        (r"\\(?:long)?leftrightarrow", " ↔ "),
+        (r"\$\s*\\(?:long)?rightarrow\s*\$", " → "),
+        (r"\\(?:long)?rightarrow", " → "),
+        (r"\$\s*\\to\s*\$", " → "),
+        (r"\\to\b", " → "),
+        (r"\$\s*\\(?:long)?leftarrow\s*\$", " ← "),
+        (r"\\(?:long)?leftarrow", " ← "),
+        (r"\$\s*\\(?:Rightarrow|implies)\s*\$", " ⇒ "),
+        (r"\\(?:Rightarrow|implies)", " ⇒ "),
+    ]
+    result = text
+    for pat, rep in replacements:
+        result = re.sub(pat, rep, result)
+    return re.sub(r" {2,}", " ", result).strip()
+
+
+def extract_characters_from_context(context: str) -> list[dict[str, str]]:
+    """Parse character bullet lines from the analyzed context into structured rows for the UI dialog."""
+    characters: list[dict[str, str]] = []
+    if not context:
+        return characters
+    for idx, raw_line in enumerate(context.splitlines(), 1):
+        line = raw_line.strip().lstrip("-*• ").strip()
+        if not line or line.startswith("#") or len(line) < 4:
+            continue
+        if any(marker in line.lower() for marker in ("xưng", "gọi", "nam", "nữ", "SPEAKER_", "nhân vật", "vai")):
+            parts = [p.strip() for p in re.split(r"[:\-–—|]", line, maxsplit=2) if p.strip()]
+            name = parts[0][:40] if parts else f"Nhân vật {idx}"
+            gender = "Nữ" if "nữ" in line.lower() else ("Nam" if "nam" in line.lower() else "")
+            role = parts[1][:60] if len(parts) > 1 else ""
+            self_m = re.search(r"xưng\s*['\"]?([^'\",.;/()]+)", line, re.IGNORECASE)
+            addr_m = re.search(r"gọi[^'\":]*['\"]?([^'\",.;/()]+)", line, re.IGNORECASE)
+            characters.append({
+                "id": f"char_{len(characters) + 1}",
+                "name": name,
+                "gender": gender,
+                "role": role,
+                "self_pronoun": (self_m.group(1).strip() if self_m else ""),
+                "address_others": (addr_m.group(1).strip() if addr_m else ""),
+            })
+    return characters[:12]
+
+
 def analyze_dialogue_context(
     segments: list[SubtitleSegment],
     *,
@@ -1098,7 +1233,7 @@ def analyze_dialogue_context(
             lines.append(f"{idx}. {txt}")
 
     speaker_clause = (
-        "Cues contain speaker tags like [SPEAKER_00]. Analyze deeply to identify all distinct characters.\n"
+        "Cues contain speaker tags like [SPEAKER_00]. Note that automated diarization may merge multiple characters of the same gender into one tag; analyze dialogue deeply to distinguish all characters.\n"
         if has_speaker
         else "Identify all interacting characters, their genders, and social roles from dialogue cues.\n"
     )
@@ -1118,23 +1253,58 @@ def analyze_dialogue_context(
         f"and strict Two-Way Address Rules (quy tắc xưng hô 2 chiều) to ensure 100% address consistency.\n\n"
         f"{speaker_clause}{feedback_clause}\n"
         "Extract:\n"
-        "1. CHARACTERS & ROLES: Name/Title (standard Hán-Việt for Chinese names), Gender (Nam/Nữ), and social role.\n"
+        "1. CHARACTERS & ROLES: Name/Title (standard Hán-Việt for Chinese names, e.g. 顾渊 -> Cố Uyên, 夫人 -> Phu nhân), Gender (Nam/Nữ), and social role (cổ trang / hiện đại).\n"
         "2. TWO-WAY ADDRESS RULES (Quy tắc xưng hô 2 chiều):\n"
         "   - Character A addresses B as (gọi) and refers to self as (xưng)\n"
         "   - Character B addresses A as (gọi) and refers to self as (xưng)\n"
-        "   - Specify exact pairs: anh - em, chị - em, mày - tao, tôi - anh/cô, sếp - em...\n"
+        "   - Specify exact pairs: anh - em, chị - em, mày - tao, tôi - anh/cô, sếp - em, hoặc cổ trang: ta - nàng/ngươi, chàng - thiếp, phu quân - nương tử, phu nhân - lão gia/công tử...\n"
+        "   - Prevent pronoun flipping (chống lật ngôi).\n"
         'Answer with STRICT JSON only: {"t": "### Hồ sơ nhân vật & Quy tắc xưng hô bắt buộc:\\n..."}'
     )
     user_prompt = "\n".join(lines)
 
     try:
         raw = _ASKERS[chosen](user_prompt, settings, system_prompt)
-        parsed = _parse_shortened(raw) or raw.strip()
+        parsed = clean_dialogue_context(_parse_shortened(raw) or raw.strip())
     except Exception as exc:  # noqa: BLE001
         log.warning("dialogue context analysis failed (%s)", exc)
         raise TranslateError(f"Context analysis failed: {exc}") from exc
 
     return parsed.strip(), chosen, model_name, len(sample)
+
+
+def _fetch_reference_drafts(
+    chunk: list[SubtitleSegment],
+    source_language: str,
+    target_language: str,
+) -> str:
+    """Fetch literal Google/Bing web translations for a batch to anchor LLM semantic fidelity (CapCap 2-stage refinement)."""
+    if not chunk:
+        return ""
+    texts = [seg.text for seg in chunk]
+    try:
+        drafts = web_translate.translate_texts(
+            texts,
+            provider="google",
+            source=source_language,
+            target=target_language,
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    if len(drafts) != len(chunk):
+        return ""
+    ref_lines = [
+        f'- id={seg.index}: "{seg.text}" ||| Literal draft: "{draft.strip()}"'
+        for seg, draft in zip(chunk, drafts)
+        if draft and draft.strip()
+    ]
+    if not ref_lines:
+        return ""
+    return (
+        "### Literal Meaning Reference (Bản dịch thô sát nghĩa từng câu để đối chiếu):\n"
+        + "\n".join(ref_lines)
+        + "\nCRITICAL: Use the literal drafts above to ensure 100% of the factual meaning, idioms, and clauses of each cue are preserved, while refining names into standard Hán-Việt and applying natural, consistent Vietnamese address forms (xưng hô)."
+    )
 
 
 def translate(
@@ -1167,13 +1337,19 @@ def translate(
     if chosen not in _ASKERS:
         raise TranslateError(f"Unsupported translation provider: {chosen}")
 
-    ask = _ASKERS[chosen]
+    raw_ask = _ASKERS[chosen]
+    ask = raw_ask
     model_name = {
         "gemini": settings.gemini_model,
         "openai": settings.openai_chat_model,
         "deepseek": settings.deepseek_chat_model,
         "ollama": settings.ollama_chat_model,
     }[chosen]
+
+    effective_preset = _infer_preset(preset, segments, source_language)
+    use_web_reference = raw_ask in (_ask_gemini, _ask_openai, _ask_deepseek, _ask_ollama) and (
+        chosen == "ollama" or bool(api_key(chosen, settings))
+    )
 
     # Gemini is billed per *request*, and a free-tier key is limited per minute:
     # the model decides how many lines fit in one call and how long to breathe.
@@ -1215,11 +1391,15 @@ def translate(
         if position > 1:
             report(emit=True)  # cheap cancellation checkpoint
         rolling_guidance = build_rolling_context_guidance(ledger)
+        if use_web_reference:
+            ref_block = _fetch_reference_drafts(chunk, source_language, target_language)
+            if ref_block:
+                rolling_guidance = f"{rolling_guidance}\n\n{ref_block}".strip() if rolling_guidance else ref_block
         system = _system_prompt(
             target_language,
             source_language,
             style,
-            preset=preset,
+            preset=effective_preset,
             context_guidance=rolling_guidance,
             custom_prompt=custom_prompt,
         )

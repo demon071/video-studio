@@ -202,6 +202,139 @@ def _char_budget(seconds: float, *, rate: float = CHARS_PER_SECOND) -> int:
     return max(MIN_SLOT_CHARS, int(seconds * rate))
 
 
+# ---------------------------------------------------------------------------
+# Group scheduling: share the speed-up over a run of back-to-back lines
+# ---------------------------------------------------------------------------
+# Fitting every line into its own slot fails exactly where dialogue is dense:
+# a line with no silence after it has to be sped up hard and then *trimmed*,
+# while its neighbours may have time to spare. The planner instead treats lines
+# that follow each other closely as one group, spreads one moderate speed-up
+# over the whole group, lets a line start a little early or a little late, and
+# never cuts a word - a group that still runs long pushes the next one back.
+LEAD_S = 0.3        # a line may start this much before its cue (into silence)
+CLIP_GAP_S = 0.08   # breath kept between two dubbed lines
+JOIN_GAP_S = 0.4    # cues closer than this belong to the same group
+
+
+@dataclass(frozen=True)
+class Placement:
+    index: int
+    start: float
+    end: float
+    ratio: float
+    needed: float
+    clamped: bool
+    group_size: int
+
+
+def plan_schedule(
+    items: Sequence[tuple[int, float, float, float]],
+    *,
+    max_ratio: float,
+    end_limit: float | None = None,
+) -> dict[int, Placement]:
+    """Place ``(index, cue_start, cue_end, tts_seconds)`` lines on the track.
+
+    Returns where each clip starts and how fast it must play. Lines keep their
+    cue start whenever the group has room; otherwise they move earlier (into the
+    silence before the group) or later (after the previous line) so the group's
+    speed-up stays uniform and as small as possible.
+    """
+    ordered = sorted(items, key=lambda item: (item[1], item[0]))
+    if not ordered:
+        return {}
+
+    groups: list[list[tuple[int, float, float, float]]] = [[ordered[0]]]
+    for previous, item in zip(ordered, ordered[1:]):
+        if item[1] - previous[2] < JOIN_GAP_S:
+            groups[-1].append(item)
+        else:
+            groups.append([item])
+
+    plan: dict[int, Placement] = {}
+    cursor: float | None = None  # where the previous group's last clip ended
+    max_ratio = max(1.0, float(max_ratio))
+
+    for position, group in enumerate(groups):
+        first_start, last_end = group[0][1], group[-1][2]
+        win_start = max(0.0, first_start - LEAD_S)
+        if cursor is not None:
+            win_start = max(win_start, cursor + CLIP_GAP_S)
+        if position + 1 < len(groups):
+            win_end = min(groups[position + 1][0][1] - CLIP_GAP_S, last_end + GAP_BORROW_S)
+        else:
+            win_end = last_end + GAP_BORROW_S
+            if end_limit is not None:
+                win_end = min(win_end, end_limit)
+        win_end = max(win_end, win_start + 0.05)
+
+        speech = sum(max(item[3], 0.0) for item in group) + CLIP_GAP_S * (len(group) - 1)
+        needed = speech / (win_end - win_start)
+        ratio = 1.0 if needed <= 1.0 else min(needed, max_ratio)
+        clamped = needed > max_ratio + 1e-3
+        lengths = [max(item[3], 0.0) / ratio for item in group]
+
+        # Latest start that still lets every following line end by `win_end`.
+        latest: list[float] = [0.0] * len(group)
+        moment = win_end
+        for k in range(len(group) - 1, -1, -1):
+            moment -= lengths[k]
+            latest[k] = moment
+            moment -= CLIP_GAP_S
+
+        floor = win_start
+        for k, (index, cue_start, _cue_end, _seconds) in enumerate(group):
+            start = max(floor, min(cue_start, latest[k]))
+            end = start + lengths[k]
+            plan[index] = Placement(
+                index=index,
+                start=round(start, 3),
+                end=round(end, 3),
+                ratio=round(ratio, 4),
+                needed=round(needed, 4),
+                clamped=clamped,
+                group_size=len(group),
+            )
+            floor = end + CLIP_GAP_S
+        cursor = floor - CLIP_GAP_S
+    return plan
+
+
+@dataclass
+class _Take:
+    segment: SubtitleSegment
+    source: str
+    spoken: str
+    raw: Path
+    seconds: float
+    voice: str
+    rate: str | None
+    rewritten: bool = False
+
+
+def _speak_take(
+    segment: SubtitleSegment,
+    text: str,
+    *,
+    provider: str,
+    voice: str,
+    rate: str | None,
+    folder: Path,
+    trim_silence: bool,
+    settings: Settings,
+) -> tuple[Path, float]:
+    """Synthesise one line, drop its boundary silence and measure it."""
+    raw = folder / f"line_{segment.index:03d}.{_raw_extension(provider)}"
+    try:
+        produced = synthesize(text, raw, provider=provider, voice=voice, rate=rate, settings=settings)
+        clip = Path(produced) if produced else raw
+        if trim_silence:
+            media_processor.trim_boundary_silence(clip)
+        return clip, media_processor.probe_duration(clip)
+    except (TtsError, MediaError) as exc:
+        raise TtsError(f"line {segment.index}: {exc}") from exc
+
+
 def _prepare_rewrite(timing_rewrite: bool, settings: Settings) -> bool:
     """Only LLM-backed providers can shorten a line to fit its time slot."""
     if not timing_rewrite:
@@ -343,9 +476,12 @@ def dub(
     clips: list[tuple[float, Path]] = []
     skipped = 0
     speaker_map = dict(speaker_voices or {})
+    max_ratio = float(settings.max_tempo_ratio or 1.35)
 
     report(stage="tts", fraction=0.0, message=f"{total_lines} lines via {chosen}/{speaker}")
 
+    # 1) Speak every line first: the planner needs the real length of each take.
+    takes: list[_Take] = []
     for position, segment in enumerate(ordered, start=1):
         text = (segment.translation if use_translation and segment.translation else segment.text) or ""
         text = text.strip()
@@ -363,41 +499,139 @@ def dub(
             if segment.speed is not None and segment.speed > 0
             else rate
         )
-        line = _render_line(
+
+        spoken, did_rewrite = text, False
+        slot = max(slots[segment.index] - segment.start, 0.05)
+        # A line far denser than its slot is reworded before it is spoken.
+        if timing_rewrite and len(text) > _char_budget(slot) * 1.25:
+            candidate = translate_service.shorten_for_timing(
+                text,
+                max_chars=_char_budget(slot),
+                language=spoken_language,
+                settings=settings,
+            )
+            if candidate != text:
+                spoken, did_rewrite = candidate, True
+                report(message=f"line {segment.index} rewritten to fit {slot:.2f}s")
+
+        raw, seconds = _speak_take(
             segment,
-            text,
+            spoken,
             provider=chosen,
             voice=line_voice,
             rate=line_rate,
             folder=folder,
-            slot_end=slots[segment.index],
-            timing_rewrite=timing_rewrite,
             trim_silence=trim_silence,
-            language=spoken_language,
-            report=report,
             settings=settings,
         )
-        if line.clip_path:
-            clips.append((segment.start, Path(line.clip_path)))
-        reports.append(line)
+        takes.append(
+            _Take(
+                segment=segment,
+                source=text,
+                spoken=spoken,
+                raw=raw,
+                seconds=seconds,
+                voice=line_voice,
+                rate=line_rate,
+                rewritten=did_rewrite,
+            )
+        )
         report(
-            fraction=position / total_lines,
-            message=f"dubbed line {position}/{total_lines}",
-            data={"index": segment.index, "ratio": line.applied_ratio, "clamped": line.clamped},
+            fraction=0.85 * position / total_lines,
+            message=f"spoke line {position}/{total_lines}",
+            data={"index": segment.index},
         )
 
-    if not clips:
+    if not takes:
         raise TtsError("Every subtitle line was empty - nothing to dub")
+
+    video_duration: float | None = None
+    if video_path:
+        try:
+            video_duration = media_processor.probe_duration(video_path)
+        except MediaError as exc:
+            log.warning("cannot probe video duration: %s", exc)
+
+    def schedule() -> dict[int, Placement]:
+        return plan_schedule(
+            [(t.segment.index, t.segment.start, t.segment.end, t.seconds) for t in takes],
+            max_ratio=max_ratio,
+            end_limit=video_duration,
+        )
+
+    # 2) Plan the whole track; a group that still needs too much speed-up gets
+    #    its lines reworded (LLM providers only) and is planned again.
+    plan = schedule()
+    if timing_rewrite:
+        changed = False
+        for take in takes:
+            placed = plan[take.segment.index]
+            if not placed.clamped or take.rewritten:
+                continue
+            share = max_ratio / max(placed.needed, 0.01)
+            candidate = translate_service.shorten_for_timing(
+                take.spoken,
+                max_chars=max(MIN_SLOT_CHARS, int(len(take.spoken) * share * 0.95)),
+                language=spoken_language,
+                settings=settings,
+            )
+            if candidate == take.spoken:
+                continue
+            take.raw, take.seconds = _speak_take(
+                take.segment,
+                candidate,
+                provider=chosen,
+                voice=take.voice,
+                rate=take.rate,
+                folder=folder,
+                trim_silence=trim_silence,
+                settings=settings,
+            )
+            take.spoken, take.rewritten, changed = candidate, True, True
+            report(message=f"line {take.segment.index} shortened to fit its group")
+        if changed:
+            plan = schedule()
+
+    # 3) Render each take at the planned speed - nothing is trimmed.
+    for take in takes:
+        index = take.segment.index
+        placed = plan[index]
+        aligned = folder / f"line_{index:03d}.aligned.wav"
+        try:
+            media_processor.apply_tempo(take.raw, aligned, ratio=placed.ratio)
+        except MediaError as exc:
+            raise TtsError(f"line {index}: {exc}") from exc
+        if placed.clamped:
+            report(
+                message=(
+                    f"line {index}: group of {placed.group_size} needs {placed.needed:.2f}x, "
+                    f"played at {placed.ratio:.2f}x and shifted to {placed.start:.2f}s"
+                )
+            )
+        clips.append((placed.start, aligned))
+        reports.append(
+            DubbingSegmentReport(
+                index=index,
+                start=placed.start,
+                end=placed.end,
+                target_duration=round(placed.end - placed.start, 3),
+                tts_duration=round(take.seconds, 3),
+                applied_ratio=placed.ratio,
+                clamped=placed.clamped,
+                overflow_s=0.0,
+                rewritten=take.rewritten,
+                spoken=take.spoken,
+                source=take.source,
+                clip_path=str(aligned),
+            )
+        )
 
     rewritten = sum(1 for item in reports if item.rewritten)
 
     duration = max((item.end for item in segments), default=0.0)
-    if video_path:
-        try:
-            duration = max(duration, media_processor.probe_duration(video_path))
-        except MediaError as exc:
-            log.warning("cannot probe video duration: %s", exc)
-    duration = max(duration, reports[-1].end, 0.5)
+    if video_duration:
+        duration = max(duration, video_duration)
+    duration = max(duration, max(item.end for item in reports), 0.5)
 
     track = media_processor.build_dub_track(
         clips,
@@ -503,7 +737,21 @@ def remix(
     missing: list[int] = []
     for item in sorted(reports, key=lambda entry: entry.start):
         if item.clip_path and Path(item.clip_path).is_file():
-            clips.append((item.start, item.clip_path))
+            clip_p = Path(item.clip_path)
+            desired_dur = max(item.end - item.start, 0.15)
+            if clip_p.name.endswith(".aligned.wav"):
+                try:
+                    cur_dur = media_processor.probe_duration(clip_p)
+                    if abs(cur_dur - desired_dur) > 0.04:
+                        raw_wav = clip_p.with_name(f"line_{item.index:03d}.wav")
+                        raw_mp3 = clip_p.with_name(f"line_{item.index:03d}.mp3")
+                        raw_src = raw_wav if raw_wav.is_file() else (raw_mp3 if raw_mp3.is_file() else clip_p)
+                        src_dur = media_processor.probe_duration(raw_src) if raw_src != clip_p else cur_dur
+                        ratio = min(max(src_dur / desired_dur, 0.5), 2.5)
+                        media_processor.apply_tempo(raw_src, clip_p, ratio=ratio)
+                except MediaError as exc:
+                    log.warning("Could not restretch dub clip %s: %s", clip_p, exc)
+            clips.append((item.start, str(clip_p)))
         else:
             missing.append(item.index)
 
@@ -555,9 +803,11 @@ __all__ = [
     "CueOutcome",
     "DEFAULT_PROVIDER",
     "DubOutcome",
+    "Placement",
     "TtsError",
     "cue",
     "dub",
+    "plan_schedule",
     "preview",
     "remix",
     "resolve_voice",

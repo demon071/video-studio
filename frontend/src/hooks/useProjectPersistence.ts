@@ -8,6 +8,7 @@ import {
   persistSessionNow,
   restoreLastSession,
   saveCurrentProject,
+  syncActiveQueueItem,
 } from "@/lib/project";
 import { useEditor } from "@/store/editorStore";
 
@@ -56,7 +57,12 @@ export function useProjectPersistence(): void {
       if (!restored.current || !hasWork(state)) return;
       if (!touchesDocument(state, previous)) return;
       window.clearTimeout(timer);
-      timer = window.setTimeout(() => void persistSession(), AUTOSAVE_MS);
+      timer = window.setTimeout(() => {
+        void persistSession();
+        if (useEditor.getState().activeQueueItemId) {
+          void syncActiveQueueItem().catch(() => null);
+        }
+      }, AUTOSAVE_MS);
     });
     return () => {
       window.clearTimeout(timer);
@@ -101,6 +107,16 @@ function touchesDocument(state: EditorState, previous: EditorState): boolean {
     state.segments !== previous.segments ||
     state.dub !== previous.dub ||
     state.aspect !== previous.aspect ||
+    state.subtitleStyle !== previous.subtitleStyle ||
+    state.presentationMode !== previous.presentationMode ||
+    state.secondarySegments !== previous.secondarySegments ||
+    state.secondaryStyle !== previous.secondaryStyle ||
+    state.layers !== previous.layers ||
+    state.videoClips !== previous.videoClips ||
+    state.backgroundAudioPath !== previous.backgroundAudioPath ||
+    state.voiceGain !== previous.voiceGain ||
+    state.flipHorizontal !== previous.flipHorizontal ||
+    state.speakerVoices !== previous.speakerVoices ||
     state.sttProvider !== previous.sttProvider ||
     state.whisperSize !== previous.whisperSize ||
     state.sourceLanguage !== previous.sourceLanguage ||

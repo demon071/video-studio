@@ -181,7 +181,8 @@ class ContextAnalyzeRequest(BaseModel):
     segments: list[SubtitleSegment]
     source_language: str = "auto"
     target_language: str = "vi"
-    provider: Literal["gemini", "openai", "deepseek", "ollama"] | None = None
+    provider: str | None = None
+    preset: str | None = None
     user_guidance: str = Field(
         default="",
         description="User feedback to revise character roles/genders/pronouns (e.g. 'Đảo ngược 2 nhân vật A và B')",
@@ -194,6 +195,11 @@ class ContextAnalyzeRequest(BaseModel):
 
 class ContextAnalyzeResult(BaseModel):
     context: str
+    context_guidance: str = ""
+    summary: str = ""
+    characters: list[dict[str, str]] = Field(default_factory=list)
+    pronoun_rules: list[dict[str, str]] = Field(default_factory=list)
+    term_glossary: list[dict[str, str]] = Field(default_factory=list)
     provider: str
     model: str
     sampled_cues: int

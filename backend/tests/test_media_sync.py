@@ -124,6 +124,61 @@ def test_char_budget_tracks_the_sentence_and_has_a_floor() -> None:
     assert tts_service._char_budget(0.1) == tts_service.MIN_SLOT_CHARS
 
 
+def test_plan_keeps_lines_that_fit_on_their_cue() -> None:
+    plan = tts_service.plan_schedule(
+        [(1, 0.0, 2.0, 1.5), (2, 5.0, 7.0, 1.0)],
+        max_ratio=1.35,
+    )
+
+    assert plan[1].start == 0.0 and plan[1].ratio == 1.0
+    assert plan[2].start == 5.0 and plan[2].ratio == 1.0
+    assert not plan[1].clamped and not plan[2].clamped
+
+
+def test_plan_spreads_one_long_line_over_its_back_to_back_group() -> None:
+    # Three cues with no silence between them; only the middle take is long.
+    # Per-line fitting would need 2.6/1.0 = 2.6x on line 2 and trim it; the
+    # group has 3.0s of cues + borrowed silence for 4.1s of speech.
+    plan = tts_service.plan_schedule(
+        [(1, 0.0, 1.0, 0.7), (2, 1.0, 2.0, 2.6), (3, 2.0, 3.0, 0.8)],
+        max_ratio=1.35,
+    )
+
+    ratios = {item.ratio for item in plan.values()}
+    assert len(ratios) == 1  # one uniform speed for the whole group
+    assert max(ratios) <= 1.35
+    # Lines never overlap and keep a breath between them.
+    assert plan[1].end + tts_service.CLIP_GAP_S <= plan[2].start + 1e-6
+    assert plan[2].end + tts_service.CLIP_GAP_S <= plan[3].start + 1e-6
+
+
+def test_plan_never_trims_and_pushes_the_next_group_back() -> None:
+    # Far too much speech for the slot: capped at max_ratio, the rest spills.
+    plan = tts_service.plan_schedule(
+        [(1, 0.0, 1.0, 4.0), (2, 3.0, 4.0, 0.5)],
+        max_ratio=1.35,
+    )
+
+    assert plan[1].clamped
+    assert plan[1].ratio == pytest.approx(1.35)
+    assert plan[1].end - plan[1].start == pytest.approx(4.0 / 1.35, abs=0.01)
+    assert plan[2].start >= plan[1].end  # shifted, not overlapping
+
+
+def test_plan_may_start_a_line_early_into_preceding_silence() -> None:
+    # The next group starts at 4.6s, so lines 1-2 (2.58s of speech) do not fit
+    # between 2.0s and 4.52s at normal speed - starting early avoids a speed-up.
+    plan = tts_service.plan_schedule(
+        [(1, 2.0, 3.0, 1.8), (2, 3.0, 4.0, 0.7), (3, 4.6, 5.0, 0.3)],
+        max_ratio=1.35,
+    )
+
+    assert plan[1].ratio == 1.0
+    assert plan[1].start < 2.0
+    assert plan[1].start >= 2.0 - tts_service.LEAD_S - 1e-6
+    assert plan[2].end <= 4.6 - tts_service.CLIP_GAP_S + 1e-6
+
+
 # ---------------------------------------------------------------------------
 # Dubbing keeps the clip's own audio, only quieter
 # ---------------------------------------------------------------------------

@@ -131,8 +131,9 @@ def test_style_moves_the_caption_and_paints_a_translucent_box() -> None:
     content = to_ass([SubtitleSegment(index=1, start=0.0, end=1.0, text="hi")], style=style)
 
     # 80 px * 1.5 = 120; alignment 7 = top-left; 1080 * 4 % = 43; 1920 * 10 % = 192.
+    # With BorderStyle=3, libass paints the box from OutlineColour, so both carry the box colour + alpha.
     assert (
-        _style_row(content) == "Style: Default,Arial,120,&H0000CCFF,&H000000FF,&H00101010,&H99000000,"
+        _style_row(content) == "Style: Default,Arial,120,&H0000CCFF,&H000000FF,&H99000000,&H99000000,"
         "0,0,0,0,100,100,0,0,3,11,0,7,43,43,192,1"
     )
 

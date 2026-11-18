@@ -33,7 +33,7 @@ import {
   regionLabel,
   type Region,
 } from "@/lib/region";
-import { runFastPreview } from "@/lib/tasks";
+import { deleteTimelineClip, runFastPreview, splitTimelineClip, undoTimelineCut } from "@/lib/tasks";
 import { selectActiveSegment, useEditor } from "@/store/editorStore";
 import type { LayerKind } from "@/types/editor";
 
@@ -53,6 +53,31 @@ function rgba(hex: string, alpha: number): string {
   const green = Number.parseInt(value.slice(2, 4), 16);
   const blue = Number.parseInt(value.slice(4, 6), 16);
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+const DISPLAY_PUNCT_RE = /[.,!?;:…—–"“”‘’«»،、，。！？；：]+/g;
+
+/** Mirror of `clean_text` + `wrap_text` in `backend/app/utils/subtitles.py`. */
+function wrapCaption(raw: string, maxChars = 21): string {
+  const text = raw.replace(DISPLAY_PUNCT_RE, " ").replace(/\s+/g, " ").trim();
+  if (!text || text.length <= maxChars) return text;
+  const tokens = text.split(" ");
+  if (tokens.length < 2) {
+    const mid = Math.floor(text.length / 2);
+    return `${text.slice(0, mid)}\n${text.slice(mid)}`;
+  }
+  let bestIdx = 1;
+  let bestScore = Number.POSITIVE_INFINITY;
+  let running = 0;
+  for (let i = 0; i < tokens.length - 1; i += 1) {
+    running += tokens[i].length + 1;
+    const score = Math.abs(running - text.length / 2);
+    if (score < bestScore) {
+      bestScore = score;
+      bestIdx = i + 1;
+    }
+  }
+  return `${tokens.slice(0, bestIdx).join(" ")}\n${tokens.slice(bestIdx).join(" ")}`;
 }
 
 export function PreviewPane() {
@@ -220,6 +245,20 @@ export function PreviewPane() {
         }
         return;
       }
+      if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+        const k = event.key.toLowerCase();
+        if (k === "z" && !event.shiftKey) {
+          event.preventDefault();
+          undoTimelineCut();
+          return;
+        }
+        if (k === "b") {
+          event.preventDefault();
+          splitTimelineClip();
+          return;
+        }
+        return;
+      }
       if (event.code === "Space") {
         event.preventDefault();
         player.toggle();
@@ -229,6 +268,24 @@ export function PreviewPane() {
       } else if (event.code === "ArrowRight") {
         event.preventDefault();
         setPlayhead(playhead + 1, { seek: true });
+      } else if (event.code === "Comma") {
+        event.preventDefault();
+        setPlayhead(Math.max(0, Number((playhead - 0.04).toFixed(3))), { seek: true });
+      } else if (event.code === "Period") {
+        event.preventDefault();
+        setPlayhead(Number((playhead + 0.04).toFixed(3)), { seek: true });
+      } else if (event.code === "KeyS") {
+        event.preventDefault();
+        splitTimelineClip();
+      } else if (event.code === "Delete") {
+        const st = useEditor.getState();
+        if (st.selectedLayerId) {
+          event.preventDefault();
+          st.removeLayer(st.selectedLayerId);
+        } else if (st.selectedClipId && st.videoClips.length > 1) {
+          event.preventDefault();
+          deleteTimelineClip(st.selectedClipId);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -751,7 +808,7 @@ export function PreviewPane() {
                     backgroundColor: "rgba(0,0,0,0.5)",
                   }}
                 >
-                  {secondaryText}
+                  {wrapCaption(secondaryText, 999)}
                 </span>
               </div>
             )}
@@ -778,15 +835,17 @@ export function PreviewPane() {
                 {/* Sized in `cqh` so the overlay is the same fraction of the frame
                     the ASS style burns in (≈4.2 % of the height). */}
                 <span
-                  className="max-w-full leading-snug"
+                  className="max-w-full"
                   style={{
                     fontFamily: subtitleStyle.font,
                     fontWeight: subtitleStyle.bold ? 700 : 400,
-                    fontSize: `max(9px, calc(4.2cqh * ${subtitleStyle.size}))`,
+                    fontSize: `max(9px, calc(3.55cqh * ${subtitleStyle.size}))`,
+                    lineHeight: 1.18,
                     color: subtitleStyle.color,
                     textAlign: subtitleStyle.horizontal,
+                    whiteSpace: "pre-line",
                     overflowWrap: "anywhere",
-                    ...(subtitleStyle.outline > 0
+                    ...(!subtitleStyle.background && subtitleStyle.outline > 0
                       ? {
                           WebkitTextStrokeWidth: `${(0.23 * subtitleStyle.outline).toFixed(2)}cqh`,
                           WebkitTextStrokeColor: subtitleStyle.outline_color,
@@ -799,13 +858,13 @@ export function PreviewPane() {
                             subtitleStyle.background_color,
                             subtitleStyle.background_opacity,
                           ),
-                          borderRadius: "0.24em",
-                          padding: "0.12em 0.36em",
+                          borderRadius: "0.22em",
+                          padding: "0.18em 0.35em",
                         }
                       : { textShadow: "0 2px 6px rgba(0,0,0,0.9)" }),
                   }}
                 >
-                  {caption}
+                  {wrapCaption(caption)}
                 </span>
               </div>
             )}

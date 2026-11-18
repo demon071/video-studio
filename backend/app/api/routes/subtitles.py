@@ -101,8 +101,12 @@ def analyze_context(request: ContextAnalyzeRequest) -> ContextAnalyzeResult:
             user_guidance=request.user_guidance,
             existing_context=request.existing_context,
         )
+        characters = translate_service.extract_characters_from_context(context)
         return ContextAnalyzeResult(
             context=context,
+            context_guidance=context,
+            summary=context.splitlines()[0].lstrip("# ").strip() if context else "",
+            characters=characters,
             provider=provider,
             model=model,
             sampled_cues=count,

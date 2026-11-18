@@ -66,6 +66,17 @@ export interface ProjectSnapshot {
   dub: DubbingResult | null;
   /** Caption look; projects saved before it existed fall back to the default. */
   subtitleStyle?: SubtitleStyle;
+  presentationMode?: SubtitlePresentationMode;
+  secondarySegments?: SubtitleSegment[];
+  secondaryStyle?: SubtitleStyle;
+  layers?: VisualLayer[];
+  videoClips?: VideoClip[];
+  backgroundAudioPath?: string | null;
+  voiceGain?: number;
+  flipHorizontal?: boolean;
+  speakerVoices?: Record<string, string>;
+  qualityProfile?: QualityProfile;
+  useNvenc?: boolean;
   playhead: number;
   previewSubtitles: boolean;
   previewDub: boolean;
@@ -99,6 +110,8 @@ interface EditorState {
   projectSavedAt: string | null;
   /** True when the document on disk is older than what is on screen. */
   projectDirty: boolean;
+  /** Queue item currently loaded via "Xem lại" so edits save back to the batch queue. */
+  activeQueueItemId: string | null;
   // project
   source: SourceClip | null;
   aspect: Aspect;
@@ -198,6 +211,7 @@ interface EditorState {
     segments: SubtitleSegment[];
     secondarySegments: SubtitleSegment[];
     layers: VisualLayer[];
+    dub?: DubbingResult | null;
   }>;
   // actions
   update: (patch: Partial<EditorState>) => void;
@@ -305,6 +319,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   projectName: "",
   projectSavedAt: null,
   projectDirty: false,
+  activeQueueItemId: null,
   source: null,
   aspect: "9:16",
   segments: [],
@@ -407,6 +422,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       projectName: "",
       projectSavedAt: null,
       projectDirty: true,
+      activeQueueItemId: null,
     }),
 
   relinkSource: (source) => set({ source, projectDirty: true }),
@@ -419,6 +435,34 @@ export const useEditor = create<EditorState>((set, get) => ({
       selected: snapshot.segments[0]?.index ?? null,
       subtitlePath: null,
       subtitleStyle: snapshot.subtitleStyle ?? get().subtitleStyle,
+      presentationMode: snapshot.presentationMode ?? "single",
+      secondarySegments: snapshot.secondarySegments
+        ? [...snapshot.secondarySegments].sort((a, b) => a.start - b.start)
+        : [],
+      secondaryStyle: snapshot.secondaryStyle ?? get().secondaryStyle,
+      layers: snapshot.layers ?? [],
+      videoClips:
+        snapshot.videoClips && snapshot.videoClips.length > 0
+          ? snapshot.videoClips
+          : snapshot.source
+            ? [
+                {
+                  id: "clip_0",
+                  name: snapshot.source.name,
+                  source_start: 0,
+                  source_end: snapshot.source.duration,
+                },
+              ]
+            : [],
+      selectedClipId: null,
+      selectedLayerId: null,
+      cutUndoStack: [],
+      backgroundAudioPath: snapshot.backgroundAudioPath ?? null,
+      voiceGain: snapshot.voiceGain ?? 1.0,
+      flipHorizontal: snapshot.flipHorizontal ?? false,
+      speakerVoices: snapshot.speakerVoices ?? {},
+      qualityProfile: snapshot.qualityProfile ?? get().qualityProfile,
+      useNvenc: snapshot.useNvenc ?? get().useNvenc,
       dub: snapshot.dub,
       dubDirty: false,
       playhead: snapshot.playhead,
@@ -443,6 +487,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       projectName: snapshot.projectName,
       projectSavedAt: snapshot.projectSavedAt,
       projectDirty: false,
+      activeQueueItemId: null,
     }),
 
   setSegments: (segments) =>

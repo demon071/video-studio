@@ -7,6 +7,8 @@ to hand the file to another tool.
 
 from __future__ import annotations
 
+from functools import lru_cache
+import os
 import re
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -55,10 +57,14 @@ def parse_timecode(value: str) -> float:
     return hours * 3600 + minutes * 60 + seconds + int(fraction) / 1000
 
 
+_DISPLAY_PUNCT_RE = re.compile(r'[.,!?;:…—–"“”‘’«»،、，。！？；：]+')
+
+
 def clean_text(text: str) -> str:
-    """Strip characters that break ASS parsing or look broken on screen."""
+    """Strip characters that break ASS parsing or punctuation unwanted on screen."""
     text = text.replace("\r", " ").replace("\n", " ")
     text = text.replace("{", "(").replace("}", ")")  # ASS override tags
+    text = _DISPLAY_PUNCT_RE.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -143,12 +149,13 @@ def _style_line(
         primary = style.color
         bold = -1 if style.bold else 0
         border = 3 if style.background else 1
-        back = (
-            _ass_color(style.background_color, alpha=int(round((1 - style.background_opacity) * 255)))
-            if style.background
-            else "&H80000000"
+        box_color = _ass_color(
+            style.background_color,
+            alpha=int(round((1 - style.background_opacity) * 255)),
         )
-        outline_color = _ass_color(style.outline_color)
+        back = box_color if style.background else "&H80000000"
+        # In libass, BorderStyle=3 draws the background box using OutlineColour!
+        outline_color = box_color if style.background else _ass_color(style.outline_color)
         # BorderStyle 3 turns the Outline field into the padding inside the box.
         edge = (
             max(int(round(size * 0.09 * max(style.outline, 1.0))), 2)
@@ -165,6 +172,134 @@ def _style_line(
         f"{outline_color},{back},{bold},0,0,0,100,100,0,0,{border},{edge},{shadow},{alignment},"
         f"{margin_l},{margin_r},{margin_y},1"
     )
+
+
+_WIN_FONT_MAP: dict[tuple[str, bool], tuple[str, ...]] = {
+    ("arial", False): ("arial.ttf",),
+    ("arial", True): ("arialbd.ttf", "arial.ttf"),
+    ("segoe ui", False): ("segoeui.ttf", "arial.ttf"),
+    ("segoe ui", True): ("segoeuib.ttf", "segoeui.ttf", "arialbd.ttf"),
+    ("tahoma", False): ("tahoma.ttf", "arial.ttf"),
+    ("tahoma", True): ("tahomabd.ttf", "tahoma.ttf", "arialbd.ttf"),
+    ("times new roman", False): ("times.ttf", "arial.ttf"),
+    ("times new roman", True): ("timesbd.ttf", "times.ttf", "arialbd.ttf"),
+}
+
+
+@lru_cache(maxsize=64)
+def _load_pil_font(font_name: str, px_size: int, bold: bool):
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        return None
+    fonts_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    key = (font_name.strip().lower(), bool(bold))
+    candidates = list(_WIN_FONT_MAP.get(key, ())) + [
+        "arialbd.ttf" if bold else "arial.ttf",
+        "segoeui.ttf",
+    ]
+    for filename in candidates:
+        p = fonts_dir / filename
+        if p.is_file():
+            try:
+                return ImageFont.truetype(str(p), px_size)
+            except OSError:
+                continue
+    return None
+
+
+def _measure_line_px(line: str, font_name: str, ass_font_size: int, bold: bool) -> float:
+    """Measure the rendered pixel width of ``line`` for an ASS ``Fontsize``."""
+    # In libass (VSFilter/GDI metrics), Fontsize includes internal leading, so the
+    # FreeType em-size is ~0.85 * Fontsize.
+    px_size = max(int(round(ass_font_size * 0.85)), 10)
+    pil_font = _load_pil_font(font_name, px_size, bold)
+    if pil_font is not None:
+        try:
+            return float(pil_font.getlength(line))
+        except Exception:
+            pass
+    factor = 0.56 if bold else 0.52
+    return len(line) * ass_font_size * factor
+
+
+def _rounded_box_path(w: int, h: int, r: int) -> str:
+    r = max(0, min(r, w // 2, h // 2))
+    return (
+        f"m {r} 0 l {w - r} 0 b {w} 0 {w} 0 {w} {r} "
+        f"l {w} {h - r} b {w} {h} {w} {h} {w - r} {h} "
+        f"l {r} {h} b 0 {h} 0 {h} 0 {h - r} "
+        f"l 0 {r} b 0 0 0 0 {r} 0"
+    )
+
+
+def _box_style_line(style: SubtitleStyle, *, name: str) -> str:
+    font = (style.font or "Arial").replace(",", " ").strip() or "Arial"
+    box_color = _ass_color(
+        style.background_color,
+        alpha=int(round((1 - style.background_opacity) * 255)),
+    )
+    return (
+        f"Style: {name},{font},80,{box_color},&H000000FF,"
+        f"{box_color},{box_color},0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1"
+    )
+
+
+def _flat_text_style_line(style: SubtitleStyle, *, name: str, base_size: int) -> str:
+    """CapCap-style BorderStyle=1 text layer placed over the vector background box."""
+    size = max(int(round(base_size * style.size)), 12)
+    font = (style.font or "Arial").replace(",", " ").strip() or "Arial"
+    bold = -1 if style.bold else 0
+    return (
+        f"Style: {name},{font},{size},{_ass_color(style.color)},&H000000FF,"
+        f"&HFF000000,&HFF000000,{bold},0,0,0,100,100,0,0,1,0,0,5,0,0,0,1"
+    )
+
+
+def _box_and_text_events(
+    wrapped: list[str],
+    *,
+    start_tc: str,
+    end_tc: str,
+    style: SubtitleStyle,
+    base_size: int,
+    width: int,
+    height: int,
+    text_style_name: str = "Default",
+    box_style_name: str = "DefaultBox",
+    base_layer: int = 0,
+) -> list[str]:
+    size = max(int(round(base_size * style.size)), 12)
+    font = (style.font or "Arial").replace(",", " ").strip() or "Arial"
+    line_w = max((_measure_line_px(line, font, size, style.bold) for line in wrapped), default=0.0)
+    pad_x = max(int(round(size * 0.35)), 12)
+    pad_y = max(int(round(size * 0.18)), 8)
+    box_w = min(width - 16, max(int(round(line_w + pad_x * 2)), size))
+    box_h = int(round(len(wrapped) * size * 1.0 + pad_y * 2))
+    radius = max(min(int(round(size * 0.22)), box_w // 4, box_h // 4), 6)
+
+    margin_l = int(width * style.margin_h / 100)
+    margin_y = int(height * style.margin_v / 100)
+    if style.horizontal == "left":
+        cx = margin_l + box_w // 2
+    elif style.horizontal == "right":
+        cx = width - margin_l - box_w // 2
+    else:
+        cx = width // 2
+
+    if style.position == "top":
+        cy = margin_y + box_h // 2
+    elif style.position == "middle":
+        cy = height // 2
+    else:
+        cy = height - margin_y - box_h // 2
+
+    path_cmd = _rounded_box_path(box_w, box_h, radius)
+    body = "\\N".join(wrapped)
+    return [
+        f"Dialogue: {base_layer},{start_tc},{end_tc},{box_style_name},,0,0,0,,{{\\an5\\pos({cx},{cy})\\fscx100\\fscy100\\bord0\\shad0\\p1}}{path_cmd}{{\\p0}}",
+        f"Dialogue: {base_layer + 1},{start_tc},{end_tc},{text_style_name},,0,0,0,,{{\\bord0\\shad0\\an5\\pos({cx},{cy})}}{body}",
+    ]
 
 
 def parse_srt(content: str) -> list[SubtitleSegment]:
@@ -274,6 +409,10 @@ def to_ass(
             margin_v=margin_v,
         )
     ]
+    if style is not None and style.background:
+        styles.append(_box_style_line(style, name="DefaultBox"))
+        styles.append(_flat_text_style_line(style, name="DefaultText", base_size=base_size))
+    sec_style: SubtitleStyle | None = None
     if presentation_mode == "bilingual":
         sec_style = secondary_style or SubtitleStyle(
             font=style.font if style else font,
@@ -303,6 +442,9 @@ def to_ass(
                 margin_v=None,
             )
         )
+        if sec_style.background:
+            styles.append(_box_style_line(sec_style, name="SecondaryBox"))
+            styles.append(_flat_text_style_line(sec_style, name="SecondaryText", base_size=base_size))
 
     styles_block = "\n".join(styles)
     header = f"""[Script Info]
@@ -331,26 +473,56 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         text = clean_text(raw or "")
         if not text:
             continue
-        body = "\\N".join(wrap_text(text))
-        lines.append(
-            "Dialogue: 0,"
-            f"{format_ass_time(segment.start)},{format_ass_time(segment.end)},"
-            f"Default,,0,0,0,,{body}"
-        )
+        wrapped = wrap_text(text)
+        start_tc = format_ass_time(segment.start)
+        end_tc = format_ass_time(segment.end)
+        if style is not None and style.background:
+            lines.extend(
+                _box_and_text_events(
+                    wrapped,
+                    start_tc=start_tc,
+                    end_tc=end_tc,
+                    style=style,
+                    base_size=base_size,
+                    width=width,
+                    height=height,
+                    text_style_name="DefaultText",
+                    box_style_name="DefaultBox",
+                    base_layer=0,
+                )
+            )
+        else:
+            body = "\\N".join(wrapped)
+            lines.append(f"Dialogue: 0,{start_tc},{end_tc},Default,,0,0,0,,{body}")
 
-    if presentation_mode == "bilingual":
+    if presentation_mode == "bilingual" and sec_style is not None:
         sec_source = secondary_segments if secondary_segments else segments
         for segment in dedupe_overlaps(sec_source):
             raw = segment.text if secondary_segments else segment.text
             text = clean_text(raw or "")
             if not text:
                 continue
-            body = "\\N".join(wrap_text(text))
-            lines.append(
-                "Dialogue: 1,"
-                f"{format_ass_time(segment.start)},{format_ass_time(segment.end)},"
-                f"Secondary,,0,0,0,,{body}"
-            )
+            wrapped = wrap_text(text)
+            start_tc = format_ass_time(segment.start)
+            end_tc = format_ass_time(segment.end)
+            if sec_style.background:
+                lines.extend(
+                    _box_and_text_events(
+                        wrapped,
+                        start_tc=start_tc,
+                        end_tc=end_tc,
+                        style=sec_style,
+                        base_size=base_size,
+                        width=width,
+                        height=height,
+                        text_style_name="SecondaryText",
+                        box_style_name="SecondaryBox",
+                        base_layer=1,
+                    )
+                )
+            else:
+                body = "\\N".join(wrapped)
+                lines.append(f"Dialogue: 1,{start_tc},{end_tc},Secondary,,0,0,0,,{body}")
 
     return header + "\n".join(lines) + "\n"
 

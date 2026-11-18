@@ -663,6 +663,7 @@ export async function addQueueItems(body: {
   aspect?: "9:16" | "16:9" | "1:1";
   bgm_mode?: "keep" | "strip" | "mute" | "custom";
   bgm_path?: string | null;
+  subtitle_style?: SubtitleStyle;
 }): Promise<QueueSnapshot> {
   try {
     const { data } = await api.post<QueueSnapshot>(ENDPOINTS.queueAdd, body);
@@ -681,9 +682,22 @@ export async function fetchQueuePreview(itemId: string): Promise<QueuePreviewRes
   }
 }
 
+export async function saveQueueItemState(
+  itemId: string,
+  body: Record<string, unknown>,
+): Promise<QueueSnapshot> {
+  try {
+    const { data } = await api.post<QueueSnapshot>(ENDPOINTS.queueItemSave(itemId), body);
+    return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
 export async function startQueueBatch(body: {
   mode: "process_only" | "process_and_export" | "export_selected";
   item_ids?: string[] | null;
+  subtitle_style?: SubtitleStyle;
 }): Promise<QueueSnapshot> {
   try {
     const { data } = await api.post<QueueSnapshot>(ENDPOINTS.queueStart, body);

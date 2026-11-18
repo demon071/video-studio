@@ -25,9 +25,21 @@ import {
   stopQueueBatch,
 } from "@/lib/api";
 import { pickAudio, pickVideos } from "@/lib/media";
+import { syncActiveQueueItem } from "@/lib/project";
 import { openVideo } from "@/lib/tasks";
 import { DEFAULT_VOICES, useEditor } from "@/store/editorStore";
-import type { Aspect, QueueSnapshot, SttProvider, TranslateProvider, TtsProvider } from "@/types/editor";
+import type {
+  Aspect,
+  QueueSnapshot,
+  SttProvider,
+  SubtitlePresentationMode,
+  SubtitleSegment,
+  SubtitleStyle,
+  TranslateProvider,
+  TtsProvider,
+  VideoClip,
+  VisualLayer,
+} from "@/types/editor";
 
 const TTS_VOICE_OPTIONS: Record<TtsProvider, Array<{ value: string; label: string }>> = {
   capcut: [
@@ -83,7 +95,18 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
   };
 
   useEffect(() => {
-    void refresh();
+    void (async () => {
+      try {
+        const synced = await syncActiveQueueItem();
+        if (synced) {
+          setSnap(synced);
+          return;
+        }
+      } catch {
+        // fallback to refresh
+      }
+      await refresh();
+    })();
     const timer = window.setInterval(() => void refresh(), 1500);
     return () => window.clearInterval(timer);
   }, []);
@@ -106,6 +129,7 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
           aspect,
           bgm_mode: bgmMode,
           bgm_path: bgmMode === "custom" ? bgmPath.trim() || null : null,
+          subtitle_style: state.subtitleStyle,
         }),
       );
     } catch (err) {
@@ -124,23 +148,57 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
     setLoading(true);
     setErrorMsg(null);
     try {
+      await syncActiveQueueItem().catch(() => null);
       const res = await fetchQueuePreview(itemId);
       await openVideo(res.video_path);
+      const ed = (res.editor_state ?? {}) as Record<string, unknown>;
+      const defaultBg =
+        res.item.bgm_mode === "strip" || res.item.bgm_mode === "custom"
+          ? (res.item.bgm_path ?? null)
+          : null;
+      const defaultKeepOrig = res.item.bgm_mode === "keep" || !res.item.bgm_mode;
+      const current = useEditor.getState();
+
       useEditor.setState({
+        activeQueueItemId: itemId,
+        projectDirty: false,
         segments: res.segments,
         dub: res.dub,
-        dubDirty: false,
-        aspect: (res.item.aspect as Aspect) || state.aspect,
+        dubDirty: typeof ed.dub_dirty === "boolean" ? ed.dub_dirty : false,
+        aspect: ((ed.aspect as Aspect) || (res.item.aspect as Aspect) || state.aspect),
         selected: res.segments[0]?.index ?? null,
+        subtitleStyle:
+          ed.subtitle_style && typeof ed.subtitle_style === "object"
+            ? (ed.subtitle_style as SubtitleStyle)
+            : current.subtitleStyle,
+        presentationMode:
+          typeof ed.presentation_mode === "string"
+            ? (ed.presentation_mode as SubtitlePresentationMode)
+            : current.presentationMode,
+        secondarySegments: Array.isArray(ed.secondary_segments)
+          ? (ed.secondary_segments as SubtitleSegment[])
+          : [],
+        secondaryStyle:
+          ed.secondary_style && typeof ed.secondary_style === "object"
+            ? (ed.secondary_style as SubtitleStyle)
+            : current.secondaryStyle,
+        layers: Array.isArray(ed.layers) ? (ed.layers as VisualLayer[]) : [],
+        videoClips:
+          Array.isArray(ed.video_clips) && ed.video_clips.length > 0
+            ? (ed.video_clips as VideoClip[])
+            : current.videoClips,
         backgroundAudioPath:
-          res.item.bgm_mode === "strip" || res.item.bgm_mode === "custom"
-            ? (res.item.bgm_path ?? null)
-            : null,
-        keepOriginalAudio: res.item.bgm_mode === "keep" || !res.item.bgm_mode,
+          "background_path" in ed ? ((ed.background_path as string | null) ?? null) : defaultBg,
+        keepOriginalAudio:
+          typeof ed.keep_original_audio === "boolean" ? ed.keep_original_audio : defaultKeepOrig,
+        voiceGain: typeof ed.voice_gain === "number" ? ed.voice_gain : current.voiceGain,
+        duckGain: typeof ed.background_gain === "number" ? ed.background_gain : current.duckGain,
+        flipHorizontal:
+          typeof ed.flip_horizontal === "boolean" ? ed.flip_horizontal : current.flipHorizontal,
       });
       state.pushLog(
         "success",
-        `Đã nạp "${res.item.title}" (${res.segments.length} dòng sub) để xem lại trước khi xuất.`,
+        `Đã nạp "${res.item.title}" (${res.segments.length} dòng sub) — mọi chỉnh sửa sẽ tự lưu lại cho xuất hàng loạt.`,
       );
       onClose();
     } catch (err) {
@@ -311,7 +369,15 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
                 <button
                   className="btn-ghost"
                   disabled={!snap?.items.length}
-                  onClick={async () => setSnap(await startQueueBatch({ mode: "process_only" }))}
+                  onClick={async () => {
+                    await syncActiveQueueItem().catch(() => null);
+                    setSnap(
+                      await startQueueBatch({
+                        mode: "process_only",
+                        subtitle_style: useEditor.getState().subtitleStyle,
+                      }),
+                    );
+                  }}
                   title="Tách sub -> Dịch -> Lồng tiếng (dừng lại để xem & sửa trước khi xuất MP4)"
                 >
                   <Play size={11} />
@@ -320,7 +386,15 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
                 {readyCount > 0 && (
                   <button
                     className="btn-ghost text-emerald-300"
-                    onClick={async () => setSnap(await startQueueBatch({ mode: "export_selected" }))}
+                    onClick={async () => {
+                      await syncActiveQueueItem().catch(() => null);
+                      setSnap(
+                        await startQueueBatch({
+                          mode: "export_selected",
+                          subtitle_style: useEditor.getState().subtitleStyle,
+                        }),
+                      );
+                    }}
                     title="Xuất MP4 hàng loạt cho các video đã xử lý xong"
                   >
                     <Play size={11} />
@@ -330,7 +404,15 @@ export function QueueModal({ onClose }: { onClose: () => void }) {
                 <button
                   className="btn-primary"
                   disabled={!snap?.items.length}
-                  onClick={async () => setSnap(await startQueueBatch({ mode: "process_and_export" }))}
+                  onClick={async () => {
+                    await syncActiveQueueItem().catch(() => null);
+                    setSnap(
+                      await startQueueBatch({
+                        mode: "process_and_export",
+                        subtitle_style: useEditor.getState().subtitleStyle,
+                      }),
+                    );
+                  }}
                 >
                   <Play size={11} />
                   Xử lý & Xuất MP4
