@@ -57,6 +57,59 @@ function rgba(hex: string, alpha: number): string {
 
 const DISPLAY_PUNCT_RE = /[.,!?;:…—–"“”‘’«»،、，。！？；：]+/g;
 
+const VI_STOPWORDS = new Set([
+  "là", "và", "của", "có", "được", "trong", "cho", "với", "không", "này", "đó",
+  "những", "các", "một", "như", "thì", "mà", "ở", "để", "từ", "khi", "đã",
+  "sẽ", "đang", "rồi", "cũng", "nhưng", "hay", "hoặc", "vì", "nên", "nếu",
+  "tôi", "bạn", "anh", "em", "chị", "nó", "họ", "chúng", "ta", "mình",
+]);
+const VI_POWER_WORDS = new Set([
+  "ngay", "luôn", "nhất", "cực", "siêu", "thật", "chắc", "tuyệt", "đỉnh",
+  "bí mật", "quan trọng", "nguy hiểm", "bất ngờ", "sự thật", "cảnh báo",
+  "tuyệt đối", "không thể", "kinh khủng", "khẩn cấp", "chết", "tiền", "tỷ", "triệu",
+]);
+
+function pickHighlightKeywords(
+  text: string,
+  mode: "off" | "auto" | "manual" | "both" | undefined,
+  manualRaw: Array<string | Record<string, unknown>> | null | undefined,
+): string[] {
+  if (!mode || mode === "off") return [];
+  const manual: string[] = [];
+  if (manualRaw) {
+    for (const item of manualRaw) {
+      if (typeof item === "string" && item.trim()) manual.push(item.trim());
+      else if (item && typeof item === "object" && typeof item.text === "string" && item.text.trim()) {
+        manual.push(item.text.trim());
+      }
+    }
+  }
+  if (mode === "manual") return manual;
+
+  const cleaned = text.replace(DISPLAY_PUNCT_RE, " ").replace(/\s+/g, " ").trim();
+  const words = cleaned.split(" ").filter(Boolean);
+  const autoKw: string[] = [];
+  if (words.length > 2) {
+    let bestWord = "";
+    let bestScore = 0;
+    words.forEach((word, idx) => {
+      const low = word.toLowerCase();
+      if (!low || VI_STOPWORDS.has(low)) return;
+      let score = 0;
+      if (/\d/.test(low)) score += 4.5;
+      if (VI_POWER_WORDS.has(low)) score += 4.0;
+      if (low.length >= 4) score += Math.min(low.length * 0.35, 2.2);
+      if (idx > 0 && idx < words.length - 1) score += 0.4;
+      if (score > bestScore) {
+        bestScore = score;
+        bestWord = word;
+      }
+    });
+    if (bestWord && bestScore >= 1.5) autoKw.push(bestWord);
+  }
+  return mode === "auto" ? autoKw : Array.from(new Set([...manual, ...autoKw]));
+}
+
 /** Mirror of `clean_text` + `wrap_text` in `backend/app/utils/subtitles.py`. */
 function wrapCaption(raw: string, maxChars = 21): string {
   const text = raw.replace(DISPLAY_PUNCT_RE, " ").replace(/\s+/g, " ").trim();
@@ -99,6 +152,10 @@ export function PreviewPane() {
   const patchLayer = useEditor((state) => state.patchLayer);
   const removeLayer = useEditor((state) => state.removeLayer);
   const flipHorizontal = useEditor((state) => state.flipHorizontal);
+  const scaleMode = useEditor((state) => state.scaleMode);
+  const brightness = useEditor((state) => state.brightness);
+  const contrast = useEditor((state) => state.contrast);
+  const saturation = useEditor((state) => state.saturation);
   const pending = useEditor((state) => state.pending);
   const previewDub = useEditor((state) => state.previewDub);
   const keepOriginalAudio = useEditor((state) => state.keepOriginalAudio);
@@ -571,6 +628,70 @@ export function PreviewPane() {
     }
   };
 
+  const handleOcrOverlayLayer = async () => {
+    if (!source?.path) return;
+    try {
+      pushLog("info", "Đang quét vùng OCR & tạo Lớp Chữ đè trực tiếp lên bảng hiệu/hình…");
+      const currentState = useEditor.getState();
+      const res = await ocrRegionTranslate({
+        video_path: source.path,
+        timestamp: playhead,
+        region: shownRegion,
+        source_language: currentState.sourceLanguage,
+        target_language: currentState.targetLanguage,
+        translate_provider: currentState.translateProvider,
+      });
+      const scannedText = (res.text || "").trim();
+      const displayTxt = (res.translation || scannedText).trim();
+      if (!displayTxt) {
+        pushLog("warn", "Không nhận dạng được chữ trong vùng đã khoanh.");
+        return;
+      }
+      const [left, top, right, bottom] = shownRegion;
+      const lx = Number(clamp(left / 100, 0, 0.95).toFixed(4));
+      const ly = Number(clamp(top / 100, 0, 0.95).toFixed(4));
+      const lw = Number(clamp((right - left) / 100, 0.06, 1 - lx).toFixed(4));
+      const lh = Number(clamp((bottom - top) / 100, 0.06, 1 - ly).toFixed(4));
+      const segStart = Math.max(0, Number((playhead - 0.1).toFixed(2)));
+      const segEnd = Number(Math.min(duration || playhead + 3, playhead + 3).toFixed(2));
+      const nowId = Date.now();
+      addLayer({
+        id: `mask_${nowId}`,
+        kind: "mask",
+        label: "Che chữ gốc (OCR)",
+        start: segStart,
+        end: segEnd,
+        x: lx,
+        y: ly,
+        w: lw,
+        h: lh,
+        color: "#000000",
+        opacity: 0.82,
+        text: "",
+        font_size: 28,
+      });
+      addLayer({
+        id: `text_${nowId + 1}`,
+        kind: "text",
+        label: "Dịch bảng hiệu (OCR)",
+        start: segStart,
+        end: segEnd,
+        x: lx,
+        y: ly,
+        w: lw,
+        h: lh,
+        color: "#FFE082",
+        opacity: 1.0,
+        text: displayTxt,
+        font_size: 28,
+      });
+      exitRegion();
+      pushLog("success", `Đã tạo lớp che & lớp chữ dịch tại vùng chọn: "${displayTxt}"`);
+    } catch (err) {
+      pushLog("error", `OCR Tạo lớp chữ thất bại: ${(err as Error).message}`);
+    }
+  };
+
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="relative flex min-h-0 flex-1 items-center justify-center bg-[radial-gradient(circle_at_50%_0%,#15191f,#0b0d10_70%)] p-3">
@@ -604,7 +725,17 @@ export function PreviewPane() {
               ref={videoRef}
               key={source.url}
               src={source.url}
-              className={`h-full w-full object-contain ${flipHorizontal ? "-scale-x-100" : ""}`}
+              className={`h-full w-full ${
+                scaleMode === "fill" ? "object-cover" : "object-contain"
+              } ${flipHorizontal ? "-scale-x-100" : ""}`}
+              style={{
+                filter:
+                  Math.abs(brightness) > 0.005 ||
+                  Math.abs(contrast - 1) > 0.005 ||
+                  Math.abs(saturation - 1) > 0.005
+                    ? `brightness(${(1 + brightness).toFixed(2)}) contrast(${contrast.toFixed(2)}) saturate(${saturation.toFixed(2)})`
+                    : undefined,
+              }}
               playsInline
               preload="metadata"
               onClick={() => {
@@ -864,7 +995,33 @@ export function PreviewPane() {
                       : { textShadow: "0 2px 6px rgba(0,0,0,0.9)" }),
                   }}
                 >
-                  {wrapCaption(caption)}
+                  {(() => {
+                    const wrappedText = wrapCaption(caption);
+                    const kws = pickHighlightKeywords(
+                      caption,
+                      subtitleStyle.highlight_mode,
+                      segment?.highlights,
+                    );
+                    if (!kws.length) return wrappedText;
+                    const escaped = kws
+                      .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+                      .join("|");
+                    const parts = wrappedText.split(new RegExp(`(${escaped})`, "gi"));
+                    return parts.map((part, idx) =>
+                      kws.some((k) => k.toLowerCase() === part.toLowerCase()) ? (
+                        <span
+                          key={idx}
+                          style={{
+                            color: subtitleStyle.highlight_color || "#FACC15",
+                          }}
+                        >
+                          {part}
+                        </span>
+                      ) : (
+                        <span key={idx}>{part}</span>
+                      ),
+                    );
+                  })()}
                 </span>
               </div>
             )}
@@ -943,9 +1100,16 @@ export function PreviewPane() {
                   <button
                     className="rounded px-1.5 py-0.5 text-[10px] text-amber-300 hover:bg-white/10"
                     onClick={() => void handleOcrTranslateNow()}
-                    title="Quét chữ trong vùng này và dịch ngay lập tức (OCR Translator)"
+                    title="Quét chữ trong vùng này và chèn vào dòng phụ đề tại thời điểm hiện tại"
                   >
-                    Quét & Dịch ngay
+                    Quét → Phụ đề
+                  </button>
+                  <button
+                    className="rounded px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-white/10"
+                    onClick={() => void handleOcrOverlayLayer()}
+                    title="Quét chữ biển hiệu/bảng trong vùng này, dịch và tự tạo Khung che + Lớp chữ đè đúng vị trí"
+                  >
+                    Quét → Đè chữ lên hình
                   </button>
                   <button
                     className="rounded px-1.5 py-0.5 text-[10px] text-slate-300 hover:bg-white/10 hover:text-white"

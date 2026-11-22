@@ -9,6 +9,7 @@ import {
   analyzeDialogueContext,
   exportAudioOnly,
   exportCapCut,
+  exportResourcePackage,
   exportSubtitles,
   importSrtFile,
   probeVideo,
@@ -599,6 +600,7 @@ export async function runDub(): Promise<void> {
     video_path: state.source?.path ?? null,
     speaker_voices: state.speakerVoices,
     trim_silence: state.trimSilence,
+    fit_voice_mode: state.fitVoiceMode,
   };
 
   state.beginTask("dub");
@@ -703,6 +705,11 @@ export async function runExport(): Promise<void> {
       quality_profile: state.qualityProfile,
       use_nvenc: state.useNvenc,
       flip_horizontal: state.flipHorizontal,
+      scale_mode: state.scaleMode,
+      brightness: state.brightness,
+      contrast: state.contrast,
+      saturation: state.saturation,
+      warps: state.dub?.warps,
       layers: state.layers,
       video_clips: isClipsEdited(state.videoClips, source.duration)
         ? state.videoClips.map((c) => ({ source_start: c.source_start, source_end: c.source_end }))
@@ -765,6 +772,10 @@ export async function runFastPreview(): Promise<string | null> {
       voice_gain: state.voiceGain,
       keep_original_audio: !state.dub || state.keepOriginalAudio,
       flip_horizontal: state.flipHorizontal,
+      scale_mode: state.scaleMode,
+      brightness: state.brightness,
+      contrast: state.contrast,
+      saturation: state.saturation,
       layers: state.layers,
       start_time: Math.max(0, state.playhead),
       sample_duration: 5.0,
@@ -807,6 +818,47 @@ export async function runExportAudio(mode: "voice" | "bgm" | "mix"): Promise<voi
     state.pushLog("error", `Xuất âm thanh thất bại: ${message(error)}`);
   } finally {
     state.endTask("exportAudio");
+  }
+}
+
+export async function runExportResourcePackage(): Promise<void> {
+  const state = store();
+  const source = state.source;
+  if (!state.segments.length && !state.dub?.track_path) {
+    state.pushLog("warn", "Chưa có phụ đề hoặc track lồng tiếng để xuất gói tài nguyên.");
+    return;
+  }
+  const baseDir = source?.path ? directoryOf(source.path) : "";
+  const baseNameStr = source?.path ? stem(source.path) : "resource_pack";
+  const suggested = baseDir
+    ? joinPath(baseDir, `${baseNameStr}_resources.zip`)
+    : `${baseNameStr}_resources.zip`;
+  const output = await pickSavePath(suggested);
+  if (!output) return;
+
+  state.beginTask("exportPackage");
+  state.pushLog("info", "Đang đóng gói tài nguyên (.SRT + .ASS + TTS WAV rời + index.csv)…");
+  try {
+    const res = await exportResourcePackage({
+      output_path: output,
+      aspect: state.aspect,
+      segments: state.segments,
+      secondary_segments: state.secondarySegments,
+      presentation_mode: state.presentationMode,
+      style: state.subtitleStyle,
+      secondary_style: state.secondaryStyle,
+      dub_track_path: state.dub?.track_path ?? null,
+      dub_segments: state.dub?.segments ?? [],
+      background_path: state.backgroundAudioPath,
+    });
+    state.pushLog(
+      "success",
+      `Đã xuất gói tài nguyên (${res.files.length} mục · ${res.tts_clips} file TTS rời · ${formatBytes(res.size_bytes)}) → ${res.output_path}`,
+    );
+  } catch (error) {
+    state.pushLog("error", `Xuất gói tài nguyên thất bại: ${message(error)}`);
+  } finally {
+    state.endTask("exportPackage");
   }
 }
 

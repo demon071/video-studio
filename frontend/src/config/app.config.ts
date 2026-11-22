@@ -28,6 +28,8 @@ export const ENDPOINTS = {
   aiPackStaging: "/api/ai-pack/staging",
   settings: "/api/settings",
   settingsTest: (name: string) => `/api/settings/providers/${encodeURIComponent(name)}/test`,
+  stylePresets: "/api/styles/presets",
+  stylePreset: (id: string) => `/api/styles/presets/${encodeURIComponent(id)}`,
   probe: "/api/media/probe",
   thumbnail: "/api/media/thumbnail",
   mediaCut: "/api/media/cut",
@@ -56,6 +58,7 @@ export const ENDPOINTS = {
   render: "/api/render",
   fastPreview: "/api/render/fast-preview",
   exportAudio: "/api/render/export-audio",
+  exportPackage: "/api/render/export-package",
   /** CapCut Desktop draft; `capcutTargets` reports where it would land. */
   capcut: "/api/export/capcut",
   capcutTargets: "/api/export/capcut/targets",

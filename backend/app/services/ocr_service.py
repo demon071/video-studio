@@ -292,24 +292,76 @@ def _dilate_5x5(mask: Any) -> Any:
 
 
 def text_mask(frame: Any) -> Any:
-    """Bright-glyph + dark-outline mask (ported from 01_TachSub_Studio).
+    """Bright-glyph + yellow/amber hardsub mask (upgraded from CapCap/app/ocr_processor.py).
 
-    Hard-burned subtitles are drawn as bright glyphs (>200) bordered by a dark
-    stroke or shadow (<90). Comparing this boolean mask between consecutive
-    frames tells whether the subtitle on screen changed in <0.3 ms without
-    running the neural detector on every frame.
+    Detects both bright white glyphs bordered by a dark stroke/shadow AND
+    high-saturation yellow/amber subtitles common in Chinese/Vietnamese short
+    dramas. Comparing this boolean mask between consecutive frames tells whether
+    the subtitle on screen changed in <0.5 ms without running the neural detector.
     """
     import numpy as np  # noqa: PLC0415
 
     arr = np.asarray(frame)
     if arr.ndim == 3:
-        gray = (
-            (arr[:, :, 2].astype(np.uint16) * 77 + arr[:, :, 1].astype(np.uint16) * 150 + arr[:, :, 0].astype(np.uint16) * 29)
-            >> 8
-        ).astype(np.uint8)
-    else:
-        gray = arr
+        b = arr[:, :, 0].astype(np.uint16)
+        g = arr[:, :, 1].astype(np.uint16)
+        r = arr[:, :, 2].astype(np.uint16)
+        gray = ((r * 77 + g * 150 + b * 29) >> 8).astype(np.uint8)
+        # Yellow/amber hardsubs: high R & G, distinctly lower B
+        yellow = (r > 155) & (g > 135) & (b < 115) & ((r - b) > 55) & ((g - b) > 40)
+        white_outlined = (gray > 195) & _dilate_5x5(gray < 95)
+        return white_outlined | (yellow & _dilate_5x5(gray < 110))
+    gray = arr
     return (gray > 200) & _dilate_5x5(gray < 90)
+
+
+def is_blank_region(frame: Any) -> bool:
+    """Fast check to skip frames with no subtitle-like high-contrast features (ported from CapCap)."""
+    import numpy as np  # noqa: PLC0415
+
+    arr = np.asarray(frame)
+    if arr.size == 0:
+        return True
+    gray = arr[:, :, 1] if arr.ndim == 3 else arr
+    bright_ratio = float(np.count_nonzero(gray > 165)) / float(gray.size)
+    if bright_ratio < 0.0015:
+        return True
+    if gray.shape[0] >= 4 and gray.shape[1] >= 4:
+        gx = np.abs(gray[:, 2:].astype(np.int16) - gray[:, :-2].astype(np.int16))
+        if float(np.mean(gx > 45)) < 0.002:
+            return True
+    return False
+
+
+def dim_background_for_ocr(frame: Any) -> Any:
+    """Dim busy background pixels around subtitle glyphs (ported from CapCap/app/ocr_processor.py).
+
+    Bright clothing or background objects touching subtitle strokes cause
+    PP-OCR to split left-right CJK radicals (e.g. ``你`` -> ``亻尔``). Dimming
+    pixels outside the dilated glyph+outline neighbourhood to 25% brightness
+    stabilises detection without altering glyph edges.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    arr = np.asarray(frame)
+    if arr.size == 0 or arr.ndim != 3:
+        return frame
+    b = arr[:, :, 0].astype(np.uint16)
+    g = arr[:, :, 1].astype(np.uint16)
+    r = arr[:, :, 2].astype(np.uint16)
+    max_c = np.maximum(np.maximum(r, g), b)
+    min_c = np.minimum(np.minimum(r, g), b)
+    white_like = (max_c > 160) & ((max_c - min_c) < 65)
+    yellow_like = (r > 145) & (g > 125) & (b < 120) & ((r - b) > 45)
+    fg = white_like | yellow_like
+    fg_ratio = float(np.count_nonzero(fg)) / float(fg.size)
+    # Only dim when foreground is a plausible subtitle band (0.2% .. 38% of crop)
+    if fg_ratio < 0.002 or fg_ratio > 0.38:
+        return frame
+    keep = _dilate_5x5(_dilate_5x5(fg))
+    out = (arr.astype(np.uint16) >> 2).astype(np.uint8)
+    out[keep] = arr[keep]
+    return out
 
 
 def frame_unchanged(mask: Any, previous_mask: Any, *, threshold: float = 0.01) -> bool:
@@ -933,6 +985,18 @@ def _winocr(language: str) -> tuple[_Reader, str]:
             arr = np.asarray(image)
         if arr.size == 0:
             return []
+        # CapCap WinOCR enhancement: upscale small crops (<220px tall) via bicubic
+        # interpolation so single-character CJK cues are not missed.
+        if arr.shape[0] < 220:
+            try:
+                from PIL import Image  # noqa: PLC0415
+
+                scale = 220.0 / max(arr.shape[0], 1)
+                new_w = max(32, int(round(arr.shape[1] * scale)))
+                pil_up = Image.fromarray(arr).resize((new_w, 220), Image.Resampling.BICUBIC)
+                arr = np.asarray(pil_up)
+            except Exception:
+                pass
         res = winocr.recognize_cv2_sync(arr, lang=resolved)
         lines: list[str] = []
         for row in res.get("lines", []) or []:
@@ -1244,8 +1308,11 @@ def transcribe(
             if frame_unchanged(mask, previous_mask) and previous_text:
                 text = previous_text
                 reused_frames += 1
+            elif is_blank_region(frame):
+                text = ""
+                reused_frames += 1
             else:
-                text = " ".join(engine.read(frame))
+                text = " ".join(engine.read(dim_background_for_ocr(frame)))
             previous_mask, previous_text = mask, text
 
             if text:

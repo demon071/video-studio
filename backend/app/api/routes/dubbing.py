@@ -54,6 +54,7 @@ def synthesize(request: DubbingRequest) -> DubbingResult:
             language=request.language,
             video_path=request.video_path,
             speaker_voices=request.speaker_voices,
+            fit_voice_mode=request.fit_voice_mode,
             report=report,
         )
         return DubbingResult(
@@ -64,6 +65,7 @@ def synthesize(request: DubbingRequest) -> DubbingResult:
             segments=outcome.reports,
             skipped=outcome.skipped,
             rewritten=outcome.rewritten,
+            warps=outcome.warps,
         ).model_dump(mode="json")
 
     return DubbingResult(**run_job("dubbing", work))

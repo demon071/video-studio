@@ -21,6 +21,7 @@ import { runDub, runImportSrtText, runTranscribe, runTranslate } from "@/lib/tas
 import { DEFAULT_VOICES, useEditor, type SidebarTab } from "@/store/editorStore";
 import type {
   AudioMode,
+  FitVoiceMode,
   SttProvider,
   SubtitlePresentationMode,
   TranslateProvider,
@@ -133,6 +134,7 @@ export function AiPanel() {
   const presentationMode = useEditor((state) => state.presentationMode);
   const speakerVoices = useEditor((state) => state.speakerVoices);
   const trimSilence = useEditor((state) => state.trimSilence);
+  const fitVoiceMode = useEditor((state) => state.fitVoiceMode);
   const settings = useEditor((state) => state.settings);
   const setSettings = useEditor((state) => state.setSettings);
   const update = useEditor((state) => state.update);
@@ -588,6 +590,17 @@ export function AiPanel() {
             onChange={(value) => update({ trimSilence: value })}
             label="Cắt khoảng lặng đầu/cuối câu TTS (-60dB)"
           />
+          <Labelled label="Khớp câu thoại dài vào hình (Fit Voice Time-Warp)">
+            <select
+              className="field !py-1 !text-[11px]"
+              value={fitVoiceMode}
+              onChange={(e) => update({ fitVoiceMode: e.target.value as FitVoiceMode })}
+            >
+              <option value="off">Tắt — Chỉ tăng tốc giọng đọc (tối đa 1.35×)</option>
+              <option value="slow">Slow Motion — Làm chậm hình đoạn thoại dài</option>
+              <option value="freeze">Freeze Frame — Giữ khung hình cuối đoạn thoại dài</option>
+            </select>
+          </Labelled>
           {speakers.length > 0 && (
             <div className="space-y-1 rounded border border-border bg-surface-1 p-2">
               <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">

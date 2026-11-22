@@ -573,6 +573,48 @@ def build_dub_track(
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
+    # CapCap fast in-memory voice track assembly (ported from CapCap/app/audio_mixer.py):
+    # O(N) NumPy buffer placement avoids spawning FFmpeg with 100+ `-i` inputs and
+    # `adelay`+`amix`, running ~10x faster and immune to Windows command-line limits.
+    try:
+        import numpy as np  # noqa: PLC0415
+        import soundfile as sf  # noqa: PLC0415
+
+        max_end = max(float(total_duration), 0.5)
+        total_samples = max(int(round((max_end + 1.0) * sample_rate)), sample_rate)
+        bed = np.zeros(total_samples, dtype=np.float32)
+        total_clips = len(clips)
+        for idx, (start, clip_path) in enumerate(clips, start=1):
+            data, sr = sf.read(str(clip_path), dtype="float32", always_2d=True)
+            mono = data.mean(axis=1) if data.shape[1] > 1 else data[:, 0]
+            if sr != sample_rate and mono.size > 1:
+                old_len = mono.shape[0]
+                new_len = max(1, int(round(old_len * sample_rate / sr)))
+                mono = np.interp(
+                    np.linspace(0.0, old_len - 1, new_len),
+                    np.arange(old_len, dtype=np.float32),
+                    mono,
+                ).astype(np.float32)
+            offset = max(0, int(round(float(start) * sample_rate)))
+            end_pos = offset + mono.shape[0]
+            if end_pos > bed.shape[0]:
+                bed = np.pad(bed, (0, end_pos - bed.shape[0]))
+            bed[offset:end_pos] += mono
+            if progress is not None:
+                progress(min(0.95 * idx / max(total_clips, 1), 0.98))
+
+        final_samples = max(1, int(round(max_end * sample_rate)))
+        bed = bed[:final_samples]
+        peak = float(np.max(np.abs(bed))) if bed.size else 0.0
+        if peak > 0.97:
+            bed *= 0.97 / peak
+        sf.write(str(target), bed, sample_rate, subtype="PCM_16")
+        if progress is not None:
+            progress(1.0)
+        return target
+    except Exception as exc:  # noqa: BLE001 - fall back to FFmpeg amix
+        log.debug("In-memory dub assembly fallback to FFmpeg (%s)", exc)
+
     inputs: list[str] = []
     for _, clip in clips:
         inputs.extend(["-i", str(clip)])
@@ -687,6 +729,11 @@ def render_final(
     quality_profile: str | None = None,
     use_nvenc: bool = False,
     flip_horizontal: bool = False,
+    scale_mode: str = "fill",
+    brightness: float = 0.0,
+    contrast: float = 1.0,
+    saturation: float = 1.0,
+    warps: Sequence[dict[str, float | str]] = (),
     layers: Sequence[VisualLayer] = (),
     video_clips: Sequence[Any] = (),
     start_time: float | None = None,
@@ -750,16 +797,28 @@ def render_final(
     width -= width % 2
     height -= height % 2
     filters: list[str] = []
+    use_blur_pad = aspect in TARGET_ASPECTS and scale_mode == "fit_blur"
     if aspect in TARGET_ASPECTS:
-        filters.append(f"scale={width}:{height}:force_original_aspect_ratio=increase")
-        filters.append(f"crop={width}:{height}")
+        if scale_mode == "fit_pad":
+            filters.append(f"scale={width}:{height}:force_original_aspect_ratio=decrease")
+            filters.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
+        elif not use_blur_pad:
+            filters.append(f"scale={width}:{height}:force_original_aspect_ratio=increase")
+            filters.append(f"crop={width}:{height}")
     if flip_horizontal:
         filters.append("hflip")
+    if abs(brightness) > 0.005 or abs(contrast - 1.0) > 0.005 or abs(saturation - 1.0) > 0.005:
+        filters.append(
+            f"eq=brightness={brightness:.3f}:contrast={contrast:.3f}:saturation={saturation:.3f}"
+        )
     filters.append("setsar=1")
     filters.append("format=yuv420p")
 
-    # Apply visual layers (Mask, Blur, Text)
+    # Apply visual layers (Mask, Text; Blur uses real boxblur in complex filtergraph)
+    blur_layers: list[tuple[int, int, int, int, int, str]] = []
     for layer in layers:
+        if not getattr(layer, "visible", True):
+            continue
         lx = max(0, min(width - 4, int(round(layer.x * width))))
         ly = max(0, min(height - 4, int(round(layer.y * height))))
         lw = max(4, min(width - lx, int(round(layer.w * width))))
@@ -776,12 +835,12 @@ def render_final(
                 f"drawbox=x={lx}:y={ly}:w={lw}:h={lh}:color=0x{color_hex}@{alpha:.2f}:t=fill{enable_expr}"
             )
         elif layer.kind == "blur":
-            # Safe delogo/drawbox blur approximation inside frame bounds
-            bx = max(1, min(width - 6, lx))
-            by = max(1, min(height - 6, ly))
-            bw = max(4, min(width - bx - 2, lw))
-            bh = max(4, min(height - by - 2, lh))
-            filters.append(f"delogo=x={bx}:y={by}:w={bw}:h={bh}{enable_expr}")
+            bx = max(0, min(width - 4, lx))
+            by = max(0, min(height - 4, ly))
+            bw = max(4, min(width - bx, lw))
+            bh = max(4, min(height - by, lh))
+            strength = max(2, min(40, int(round((layer.blur_strength or 24) / 2))))
+            blur_layers.append((bx, by, bw, bh, strength, enable_expr))
         elif layer.kind == "text" and layer.text.strip():
             safe_txt = (
                 layer.text.strip()
@@ -844,10 +903,54 @@ def render_final(
                 audio_input_label = "[aconcat]"
 
     video_map = "0:v:0"
-    if logo_inputs:
-        v_chain = f"{video_input_label}{filter_graph}[vbase]"
-        complex_parts.append(v_chain)
-        current_v = "[vbase]"
+    if use_blur_pad or blur_layers or logo_inputs or warps:
+        current_v = video_input_label
+        if warps and not valid_clips:
+            from app.services import time_warp_service  # noqa: PLC0415
+
+            parts_plan = time_warp_service.video_parts(info.duration or duration, warps)
+            if len(parts_plan) > 1:
+                w_labels: list[str] = []
+                for w_idx, (src_start, _tgt_start, tgt_len, spd, frozen) in enumerate(parts_plan):
+                    lbl = f"[vw{w_idx}]"
+                    if frozen:
+                        t_frame = max(0.0, src_start - 0.02)
+                        complex_parts.append(
+                            f"{current_v}trim=start={t_frame:.3f}:duration=0.04,setpts=PTS-STARTPTS,"
+                            f"tpad=stop_mode=clone:stop_duration={tgt_len:.3f},trim=duration={tgt_len:.3f}{lbl}"
+                        )
+                    else:
+                        src_len = max(0.04, tgt_len * spd)
+                        pts_mult = 1.0 / max(spd, 0.1)
+                        complex_parts.append(
+                            f"{current_v}trim=start={src_start:.3f}:duration={src_len:.3f},"
+                            f"setpts=({pts_mult:.5f})*(PTS-STARTPTS){lbl}"
+                        )
+                    w_labels.append(lbl)
+                complex_parts.append(f"{''.join(w_labels)}concat=n={len(w_labels)}:v=1:a=0[vwarped]")
+                current_v = "[vwarped]"
+                duration = sum(p[2] for p in parts_plan)
+        if use_blur_pad:
+            complex_parts.append(
+                f"{current_v}split=2[vbg_in][vfg_in];"
+                f"[vbg_in]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},boxblur=24:4[vbg];"
+                f"[vfg_in]scale={width}:{height}:force_original_aspect_ratio=decrease[vfg];"
+                f"[vbg][vfg]overlay=(W-w)/2:(H-h)/2[vframed]"
+            )
+            current_v = "[vframed]"
+        for b_idx, (bx, by, bw, bh, strength, enable_expr) in enumerate(blur_layers):
+            luma_r = min(strength, max(2, min(bw, bh) // 4))
+            chroma_r = max(1, luma_r // 2)
+            complex_parts.append(
+                f"{current_v}split=2[vbm{b_idx}][vbs{b_idx}];"
+                f"[vbs{b_idx}]crop={bw}:{bh}:{bx}:{by},boxblur={luma_r}:2:{chroma_r}:2[vbb{b_idx}];"
+                f"[vbm{b_idx}][vbb{b_idx}]overlay={bx}:{by}{enable_expr}[vbo{b_idx}]"
+            )
+            current_v = f"[vbo{b_idx}]"
+        v_target = "[vbase]" if logo_inputs else "[vout]"
+        complex_parts.append(f"{current_v}{filter_graph}{v_target}")
+        current_v = v_target
         for idx, (logo_idx, layer) in enumerate(logo_inputs):
             lx = max(0, min(width - 4, int(round(layer.x * width))))
             ly = max(0, min(height - 4, int(round(layer.y * height))))
@@ -907,7 +1010,7 @@ def render_final(
     def _build_args(nvenc: bool) -> list[str]:
         cmd_args: list[str] = [*_base(quiet=True), *inputs]
         if complex_parts:
-            if logo_inputs:
+            if video_map == "[vout]":
                 parts = complex_parts
             elif valid_clips:
                 parts = [*complex_parts, f"{video_input_label}{filter_graph}[vout]"]

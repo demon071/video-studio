@@ -88,11 +88,24 @@ class ProjectFile(BaseModel):
     background_audio_path: str | None = None
     voice_gain: float = Field(default=1.0, ge=0.0, le=3.0)
     flip_horizontal: bool = False
+    scale_mode: Literal["fill", "fit_blur", "fit_pad"] = "fill"
+    fit_voice_mode: Literal["off", "slow", "freeze"] = "off"
+    brightness: float = 0.0
+    contrast: float = 1.0
+    saturation: float = 1.0
     speaker_voices: dict[str, str] = Field(default_factory=dict)
     quality_profile: Literal["high", "balanced", "low"] = "high"
     use_nvenc: bool = False
     settings: ProjectSettings = Field(default_factory=ProjectSettings)
     view: ProjectView = Field(default_factory=ProjectView)
+
+
+class StylePreset(BaseModel):
+    """Saved caption style preset ("My Presets", shared across projects)."""
+
+    id: str
+    name: str
+    style: SubtitleStyle = Field(default_factory=SubtitleStyle)
 
 
 class ProjectSaveRequest(BaseModel):
@@ -153,4 +166,5 @@ __all__ = [
     "ProjectSource",
     "ProjectSummary",
     "ProjectView",
+    "StylePreset",
 ]

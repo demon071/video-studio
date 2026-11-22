@@ -1,9 +1,15 @@
-import { BookmarkPlus, Download, Loader2, RotateCcw, Trash2, Type } from "lucide-react";
+import { BookmarkPlus, Download, Loader2, RotateCcw, Sparkles, Trash2, Type } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { fetchStylePresets, removeStylePreset, upsertStylePreset } from "@/lib/api";
 import { runExportSubtitles } from "@/lib/tasks";
 import { useEditor } from "@/store/editorStore";
-import { DEFAULT_SUBTITLE_STYLE, type StylePresetItem, type SubtitleStyle } from "@/types/editor";
+import {
+  DEFAULT_SUBTITLE_STYLE,
+  type StylePresetItem,
+  type SubtitleAnimation,
+  type SubtitleStyle,
+} from "@/types/editor";
 
 /** Fonts that are on every Windows install plus the usual design picks. */
 const FONTS = [
@@ -68,6 +74,15 @@ export function SubtitleStylePanel() {
     }
   };
 
+  useEffect(() => {
+    if (!open) return;
+    void fetchStylePresets()
+      .then((remote) => {
+        if (remote.length > 0) persistPresets(remote);
+      })
+      .catch(() => undefined);
+  }, [open]);
+
   const handleSavePreset = () => {
     const name = presetName.trim() || `Preset ${stylePresets.length + 1}`;
     const item: StylePresetItem = {
@@ -76,7 +91,17 @@ export function SubtitleStylePanel() {
       style: { ...style },
     };
     persistPresets([...stylePresets, item]);
+    void upsertStylePreset(item)
+      .then((saved) => persistPresets(saved))
+      .catch(() => undefined);
     setPresetName("");
+  };
+
+  const handleDeletePreset = (id: string) => {
+    persistPresets(stylePresets.filter((item) => item.id !== id));
+    void removeStylePreset(id)
+      .then((saved) => persistPresets(saved))
+      .catch(() => undefined);
   };
 
   useEffect(() => {
@@ -138,7 +163,7 @@ export function SubtitleStylePanel() {
                   {p.id.startsWith("custom_") && (
                     <button
                       className="px-1 text-slate-500 hover:text-rose-400"
-                      onClick={() => persistPresets(stylePresets.filter((item) => item.id !== p.id))}
+                      onClick={() => handleDeletePreset(p.id)}
                     >
                       <Trash2 size={9} />
                     </button>
@@ -291,6 +316,50 @@ export function SubtitleStylePanel() {
             display={`${style.margin_h}%`}
             onChange={(margin_h) => setStyle({ margin_h })}
           />
+
+          {/* CapCap Keyword Highlight & ASS Animation */}
+          <div className="space-y-1.5 rounded border border-border/70 bg-surface-1 p-1.5">
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-1 text-[10px] font-medium text-amber-300">
+                <Sparkles size={10} />
+                Highlight Từ khóa (CapCap)
+              </span>
+              <Swatch
+                label="Màu"
+                color={style.highlight_color || "#FACC15"}
+                onChange={(highlight_color) => setStyle({ highlight_color })}
+              />
+            </div>
+            <select
+              className="field w-full !px-1.5 !py-1 !text-[10px]"
+              value={style.highlight_mode || "off"}
+              onChange={(e) =>
+                setStyle({
+                  highlight_mode: e.target.value as SubtitleStyle["highlight_mode"],
+                })
+              }
+            >
+              <option value="off">Tắt Highlight</option>
+              <option value="auto">Tự động AI (Số liệu & Từ khóa nhấn)</option>
+              <option value="manual">Thủ công (Theo từ khóa gán ở từng dòng)</option>
+              <option value="both">Kết hợp (Tự động AI + Thủ công)</option>
+            </select>
+
+            <label className="block space-y-0.5 pt-0.5">
+              <span className="text-[10px] text-slate-500">Hiệu ứng xuất hiện (ASS Animation)</span>
+              <select
+                className="field w-full !px-1.5 !py-1 !text-[10px]"
+                value={style.animation || "none"}
+                onChange={(e) => setStyle({ animation: e.target.value as SubtitleAnimation })}
+              >
+                <option value="none">Tĩnh (Static)</option>
+                <option value="pop">Pop In (Bật nảy TikTok)</option>
+                <option value="fade">Fade In/Out (Mờ dần)</option>
+                <option value="pulse">Pulse (Nhịp đập)</option>
+                <option value="slide_up">Slide Up (Trượt từ dưới lên)</option>
+              </select>
+            </label>
+          </div>
 
           <div className="flex items-center gap-1 border-t border-border pt-2">
             <span className="text-[10px] text-slate-500">Xuất phụ đề</span>

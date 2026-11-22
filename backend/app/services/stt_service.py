@@ -194,7 +194,19 @@ def _waveform(wav: Path) -> Any:
             log.warning("unexpected sample rate %s, letting faster-whisper decode", rate)
             return str(wav)
         mono = data.mean(axis=1) if data.shape[1] > 1 else data[:, 0]
-        return np.ascontiguousarray(mono, dtype=np.float32)
+        arr = np.ascontiguousarray(mono, dtype=np.float32)
+        # CapCap quiet-audio auto-gain normalization: boost whispered/low-volume
+        # tracks (RMS < -30 dBFS) up to +12 dB peak-limited to 0.95 so Silero VAD
+        # and Whisper do not drop quiet dialogue lines.
+        if arr.size > 0:
+            rms = float(np.sqrt(np.mean(np.square(arr))))
+            peak = float(np.max(np.abs(arr)))
+            if 1e-4 < rms < 0.032 and peak > 1e-4:
+                target_gain = min(0.045 / rms, 0.95 / peak, 4.0)
+                if target_gain > 1.15:
+                    log.info("Auto-normalizing quiet audio for ASR (rms=%.4f, gain=%.2fx)", rms, target_gain)
+                    arr = np.clip(arr * target_gain, -0.97, 0.97).astype(np.float32)
+        return arr
     except Exception as exc:  # noqa: BLE001 - soundfile missing or odd container
         log.warning("waveform read failed (%s), falling back to file decoding", exc)
         return str(wav)

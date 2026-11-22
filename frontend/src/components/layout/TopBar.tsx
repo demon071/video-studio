@@ -1,4 +1,4 @@
-import { ChevronDown, Cpu, FilePlus2, FolderOpen, ListChecks, Loader2, Music, Play, Save, Upload, Wrench, X } from "lucide-react";
+import { ChevronDown, Cpu, FilePlus2, FolderArchive, FolderOpen, ListChecks, Loader2, Music, Play, Save, Upload, Wrench, X } from "lucide-react";
 import { useState } from "react";
 
 import { MediaToolsModal } from "@/components/modals/MediaToolsModal";
@@ -8,7 +8,7 @@ import { formatPercent } from "@/lib/format";
 import { pickVideo } from "@/lib/media";
 import { cancelJob, openSystemPath } from "@/lib/api";
 import { saveCurrentProject } from "@/lib/project";
-import { openVideo, runExport, runExportAudio } from "@/lib/tasks";
+import { openVideo, runExport, runExportAudio, runExportResourcePackage } from "@/lib/tasks";
 import { useEditor } from "@/store/editorStore";
 import type { Aspect, QualityProfile } from "@/types/editor";
 
@@ -225,6 +225,24 @@ export function TopBar() {
               >
                 <Music size={11} />
                 Xuất bản trộn (Voice + BGM Mix)
+              </button>
+            </div>
+
+            <div className="space-y-1 border-t border-border pt-2">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+                Gói tài nguyên CapCap (.ZIP)
+              </span>
+              <button
+                className="btn-ghost w-full justify-start !py-1 !text-[11px] text-amber-200"
+                disabled={(!segmentCount && !hasDub) || busy}
+                onClick={() => {
+                  setShowExportMenu(false);
+                  void runExportResourcePackage();
+                }}
+                title="Đóng gói đầy đủ file .SRT gốc/dịch, .ASS, từng câu TTS .WAV rời + bảng index.csv và track giọng"
+              >
+                <FolderArchive size={11} />
+                Xuất gói tài nguyên (SRT + ASS + TTS rời)
               </button>
             </div>
           </div>

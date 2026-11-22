@@ -16,7 +16,7 @@ import { clamp, formatTime } from "@/lib/format";
 import { pickAudio, pickImage } from "@/lib/media";
 import { deleteTimelineClip, runStripBgm, splitTimelineClip } from "@/lib/tasks";
 import { useEditor } from "@/store/editorStore";
-import type { Aspect, LayerKind, QualityProfile } from "@/types/editor";
+import type { Aspect, LayerKind, QualityProfile, ScaleMode } from "@/types/editor";
 
 type InspectorSection = "video" | "layer" | "audio";
 
@@ -26,6 +26,10 @@ export function PropertiesPanel() {
   const selectedClipId = useEditor((state) => state.selectedClipId);
   const aspect = useEditor((state) => state.aspect);
   const flipHorizontal = useEditor((state) => state.flipHorizontal);
+  const scaleMode = useEditor((state) => state.scaleMode);
+  const brightness = useEditor((state) => state.brightness);
+  const contrast = useEditor((state) => state.contrast);
+  const saturation = useEditor((state) => state.saturation);
   const qualityProfile = useEditor((state) => state.qualityProfile);
   const useNvenc = useEditor((state) => state.useNvenc);
 
@@ -151,6 +155,19 @@ export function PropertiesPanel() {
                 </label>
 
                 <label className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="text-slate-400">Chế độ khung (Scale)</span>
+                  <select
+                    className="field !w-36 !py-1 !text-[11px]"
+                    value={scaleMode}
+                    onChange={(e) => update({ scaleMode: e.target.value as ScaleMode })}
+                  >
+                    <option value="fill">Cắt đầy khung (Center Crop)</option>
+                    <option value="fit_blur">Giữ nguyên + Nền mờ (Blur Pad)</option>
+                    <option value="fit_pad">Giữ nguyên + Viền đen (Fit Pad)</option>
+                  </select>
+                </label>
+
+                <label className="flex items-center justify-between gap-2 text-[11px]">
                   <span className="text-slate-400">Chất lượng xuất</span>
                   <select
                     className="field !w-36 !py-1 !text-[11px]"
@@ -182,6 +199,63 @@ export function PropertiesPanel() {
                     onChange={(e) => update({ useNvenc: e.target.checked })}
                   />
                 </label>
+
+                {/* CapCap Video Color Filters */}
+                <div className="space-y-1.5 border-t border-border/70 pt-2">
+                  <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    <span>Chỉnh màu Video (Color Filter)</span>
+                    {(brightness !== 0 || contrast !== 1 || saturation !== 1) && (
+                      <button
+                        className="text-[10px] font-normal text-brand hover:underline"
+                        onClick={() => update({ brightness: 0, contrast: 1, saturation: 1 })}
+                      >
+                        Đặt lại
+                      </button>
+                    )}
+                  </div>
+                  <label className="block text-[10px]">
+                    <div className="flex justify-between text-slate-400">
+                      <span>Độ sáng (Brightness)</span>
+                      <span className="font-mono text-slate-300">{brightness > 0 ? `+${Math.round(brightness * 100)}%` : `${Math.round(brightness * 100)}%`}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-40}
+                      max={40}
+                      value={Math.round(brightness * 100)}
+                      onChange={(e) => update({ brightness: Number(e.target.value) / 100 })}
+                      className="h-1 w-full accent-brand"
+                    />
+                  </label>
+                  <label className="block text-[10px]">
+                    <div className="flex justify-between text-slate-400">
+                      <span>Tương phản (Contrast)</span>
+                      <span className="font-mono text-slate-300">{Math.round(contrast * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={50}
+                      max={160}
+                      value={Math.round(contrast * 100)}
+                      onChange={(e) => update({ contrast: Number(e.target.value) / 100 })}
+                      className="h-1 w-full accent-brand"
+                    />
+                  </label>
+                  <label className="block text-[10px]">
+                    <div className="flex justify-between text-slate-400">
+                      <span>Bão hòa màu (Saturation)</span>
+                      <span className="font-mono text-slate-300">{Math.round(saturation * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={180}
+                      value={Math.round(saturation * 100)}
+                      onChange={(e) => update({ saturation: Number(e.target.value) / 100 })}
+                      className="h-1 w-full accent-brand"
+                    />
+                  </label>
+                </div>
               </div>
             </div>
 

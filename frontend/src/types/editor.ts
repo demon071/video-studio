@@ -15,6 +15,9 @@ export type TtsProvider = "capcut" | "elevenlabs" | "omnivoice" | "piper" | "vie
 
 export type SubtitlePresentationMode = "none" | "single" | "bilingual";
 export type QualityProfile = "high" | "balanced" | "low";
+export type ScaleMode = "fill" | "fit_blur" | "fit_pad";
+export type FitVoiceMode = "off" | "slow" | "freeze";
+export type SubtitleAnimation = "none" | "pop" | "fade" | "pulse" | "slide_up";
 export type LayerKind = "mask" | "blur" | "logo" | "text";
 
 export interface VideoClip {
@@ -79,7 +82,7 @@ export interface SubtitleSegment {
   original_end?: number | null;
   voice?: string | null;
   speed?: number | null;
-  highlights?: Array<Record<string, unknown>> | null;
+  highlights?: Array<string | Record<string, unknown>> | null;
 }
 
 export interface ProbeResult {
@@ -158,6 +161,7 @@ export interface DubbingResult {
   segments: DubbingSegmentReport[];
   skipped: number;
   rewritten?: number;
+  warps?: Array<Record<string, number | string>>;
 }
 
 /** One re-spoken cue (`POST /api/dubbing/cue`). */
@@ -197,8 +201,9 @@ export interface SubtitleStyle {
   margin_v: number;
   /** Percent of the width from the sides. */
   margin_h: number;
-  highlight_mode?: "none" | "color" | "scale";
+  highlight_mode?: "off" | "auto" | "manual" | "both";
   highlight_color?: string;
+  animation?: SubtitleAnimation;
 }
 
 export interface StylePresetItem {
@@ -259,6 +264,9 @@ export const DEFAULT_SUBTITLE_STYLE: SubtitleStyle = {
   horizontal: "center",
   margin_v: 7,
   margin_h: 6,
+  highlight_mode: "off",
+  highlight_color: "#FACC15",
+  animation: "none",
 };
 
 export interface RenderResult {
@@ -475,6 +483,11 @@ export interface ProjectFile {
   background_audio_path?: string | null;
   voice_gain?: number;
   flip_horizontal?: boolean;
+  scale_mode?: ScaleMode;
+  fit_voice_mode?: FitVoiceMode;
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
   speaker_voices?: Record<string, string>;
   quality_profile?: QualityProfile;
   use_nvenc?: boolean;

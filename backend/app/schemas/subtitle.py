@@ -322,6 +322,10 @@ class DubbingRequest(BaseModel):
     )
     language: str | None = Field(default=None, description="Language being spoken, defaults to the target language")
     video_path: str | None = Field(default=None, description="Source clip, used to length the assembled track")
+    fit_voice_mode: Literal["off", "slow", "freeze"] = Field(
+        default="off",
+        description="CapCap Fit Voice mode: off, slow (slow-motion video stretch), or freeze (hold end frame)",
+    )
 
 
 class DubbingResult(BaseModel):
@@ -332,6 +336,10 @@ class DubbingResult(BaseModel):
     segments: list[DubbingSegmentReport]
     skipped: int = 0
     rewritten: int = 0
+    warps: list[dict[str, float | str]] = Field(
+        default_factory=list,
+        description="Fit Voice time-warp spans generated when fit_voice_mode is slow or freeze",
+    )
 
 
 class DubbingCueRequest(BaseModel):
@@ -392,6 +400,9 @@ class SubtitleStyle(BaseModel):
         default="off", description="Keyword highlight mode (ported from CapCap)"
     )
     highlight_color: str = Field(default="#FACC15", description="Accent hex color for highlighted keywords")
+    animation: Literal["none", "pop", "fade", "pulse", "slide_up"] = Field(
+        default="none", description="ASS subtitle entry animation (ported from CapCap)"
+    )
 
     @field_validator("font")
     @classmethod
@@ -495,6 +506,16 @@ class RenderRequest(BaseModel):
     )
     flip_horizontal: bool = Field(
         default=False, description="Mirror the video horizontally (CapCap Video Inspector)"
+    )
+    scale_mode: Literal["fill", "fit_blur", "fit_pad"] = Field(
+        default="fill",
+        description="Aspect framing mode: fill (center crop), fit_blur (blurred background pad), or fit_pad (black bars)",
+    )
+    brightness: float = Field(default=0.0, ge=-1.0, le=1.0, description="Video brightness adjustment (-1.0..1.0)")
+    contrast: float = Field(default=1.0, ge=0.2, le=3.0, description="Video contrast multiplier (0.2..3.0)")
+    saturation: float = Field(default=1.0, ge=0.0, le=3.0, description="Video saturation multiplier (0.0..3.0)")
+    warps: list[dict[str, float | str]] = Field(
+        default_factory=list, description="Fit Voice video time-warp spans (slow / freeze)"
     )
     layers: list[VisualLayer] = Field(
         default_factory=list, description="Timed Blur, Mask, Logo, and Text visual layers"

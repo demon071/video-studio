@@ -12,6 +12,7 @@ import type {
   DubbingRemixResult,
   DubbingResult,
   DubbingSegmentReport,
+  FitVoiceMode,
   HardwareReport,
   JobInfo,
   ModelStatus,
@@ -26,9 +27,11 @@ import type {
   QueuePreviewResult,
   QueueSnapshot,
   RenderResult,
+  ScaleMode,
   SettingsDocument,
   SettingsPatchBody,
   SttProvider,
+  StylePresetItem,
   SubtitlePresentationMode,
   SubtitleSegment,
   SubtitleStyle,
@@ -218,6 +221,33 @@ export async function testProvider(name: string, body: ProviderTestBody = {}): P
   try {
     const { data } = await api.post<ProviderTestResult>(ENDPOINTS.settingsTest(name), body, long);
     return data;
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function fetchStylePresets(): Promise<StylePresetItem[]> {
+  try {
+    const { data } = await api.get<{ presets: StylePresetItem[] }>(ENDPOINTS.stylePresets);
+    return data.presets ?? [];
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function upsertStylePreset(preset: StylePresetItem): Promise<StylePresetItem[]> {
+  try {
+    const { data } = await api.post<{ presets: StylePresetItem[] }>(ENDPOINTS.stylePresets, preset);
+    return data.presets ?? [];
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function removeStylePreset(id: string): Promise<StylePresetItem[]> {
+  try {
+    const { data } = await api.delete<{ presets: StylePresetItem[] }>(ENDPOINTS.stylePreset(id));
+    return data.presets ?? [];
   } catch (error) {
     return fail(error);
   }
@@ -451,6 +481,7 @@ export interface DubbingBody {
   video_path?: string | null;
   speaker_voices?: Record<string, string>;
   trim_silence?: boolean;
+  fit_voice_mode?: FitVoiceMode;
 }
 
 export async function synthesizeDub(body: DubbingBody): Promise<DubbingResult> {
@@ -524,6 +555,11 @@ export interface RenderBody {
   quality_profile?: QualityProfile | null;
   use_nvenc?: boolean;
   flip_horizontal?: boolean;
+  scale_mode?: ScaleMode;
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  warps?: Array<Record<string, number | string>>;
   layers?: VisualLayer[];
   video_clips?: Array<{ source_start: number; source_end: number }>;
   start_time?: number | null;
@@ -560,6 +596,26 @@ export async function exportAudioOnly(body: {
   try {
     const { data } = await api.post(ENDPOINTS.exportAudio, body, long);
     return data as { output_path: string; mode: string; size_bytes: number };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export async function exportResourcePackage(body: {
+  output_path: string;
+  aspect?: string;
+  segments?: SubtitleSegment[];
+  secondary_segments?: SubtitleSegment[];
+  presentation_mode?: SubtitlePresentationMode;
+  style?: SubtitleStyle | null;
+  secondary_style?: SubtitleStyle | null;
+  dub_track_path?: string | null;
+  dub_segments?: DubbingSegmentReport[];
+  background_path?: string | null;
+}): Promise<{ output_path: string; files: string[]; tts_clips: number; size_bytes: number }> {
+  try {
+    const { data } = await api.post(ENDPOINTS.exportPackage, body, long);
+    return data as { output_path: string; files: string[]; tts_clips: number; size_bytes: number };
   } catch (error) {
     return fail(error);
   }

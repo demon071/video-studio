@@ -56,6 +56,7 @@ class DubOutcome:
     reports: list[DubbingSegmentReport] = field(default_factory=list)
     skipped: int = 0
     rewritten: int = 0
+    warps: list[dict[str, float | str]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +452,7 @@ def dub(
     trim_silence: bool = True,
     language: str | None = None,
     video_path: str | Path | None = None,
+    fit_voice_mode: str = "off",
     report: Reporter = NULL_REPORTER,
     settings: Settings | None = None,
 ) -> DubOutcome:
@@ -481,7 +483,11 @@ def dub(
     report(stage="tts", fraction=0.0, message=f"{total_lines} lines via {chosen}/{speaker}")
 
     # 1) Speak every line first: the planner needs the real length of each take.
-    takes: list[_Take] = []
+    #    Cloud providers (CapCut, ElevenLabs) run in parallel (up to 4 workers,
+    #    ported from CapCap voice_workflow.py) for 3-4x faster dubbing.
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    prepared_jobs: list[tuple[int, SubtitleSegment, str, str, str, str | None, bool]] = []
     for position, segment in enumerate(ordered, start=1):
         text = (segment.translation if use_translation and segment.translation else segment.text) or ""
         text = text.strip()
@@ -502,7 +508,6 @@ def dub(
 
         spoken, did_rewrite = text, False
         slot = max(slots[segment.index] - segment.start, 0.05)
-        # A line far denser than its slot is reworded before it is spoken.
         if timing_rewrite and len(text) > _char_budget(slot) * 1.25:
             candidate = translate_service.shorten_for_timing(
                 text,
@@ -514,33 +519,51 @@ def dub(
                 spoken, did_rewrite = candidate, True
                 report(message=f"line {segment.index} rewritten to fit {slot:.2f}s")
 
-        raw, seconds = _speak_take(
-            segment,
-            spoken,
+        prepared_jobs.append((position, segment, text, spoken, line_voice, line_rate, did_rewrite))
+
+    def _run_one_job(job: tuple[int, SubtitleSegment, str, str, str, str | None, bool]) -> tuple[int, _Take]:
+        pos, seg, src_text, spk_text, l_voice, l_rate, rewritten_flag = job
+        raw_path, secs = _speak_take(
+            seg,
+            spk_text,
             provider=chosen,
-            voice=line_voice,
-            rate=line_rate,
+            voice=l_voice,
+            rate=l_rate,
             folder=folder,
             trim_silence=trim_silence,
             settings=settings,
         )
-        takes.append(
-            _Take(
-                segment=segment,
-                source=text,
-                spoken=spoken,
-                raw=raw,
-                seconds=seconds,
-                voice=line_voice,
-                rate=line_rate,
-                rewritten=did_rewrite,
+        return pos, _Take(
+            segment=seg,
+            source=src_text,
+            spoken=spk_text,
+            raw=raw_path,
+            seconds=secs,
+            voice=l_voice,
+            rate=l_rate,
+            rewritten=rewritten_flag,
+        )
+
+    takes: list[_Take] = []
+    use_parallel = chosen in {"capcut", "elevenlabs"} and len(prepared_jobs) > 1
+    if use_parallel:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for done_count, (position, take_item) in enumerate(pool.map(_run_one_job, prepared_jobs), start=1):
+                takes.append(take_item)
+                report(
+                    fraction=0.85 * done_count / max(len(prepared_jobs), 1),
+                    message=f"spoke line {done_count}/{len(prepared_jobs)}",
+                    data={"index": take_item.segment.index},
+                )
+    else:
+        for job in prepared_jobs:
+            position, take_item = _run_one_job(job)
+            takes.append(take_item)
+            report(
+                fraction=0.85 * position / total_lines,
+                message=f"spoke line {position}/{total_lines}",
+                data={"index": take_item.segment.index},
             )
-        )
-        report(
-            fraction=0.85 * position / total_lines,
-            message=f"spoke line {position}/{total_lines}",
-            data={"index": segment.index},
-        )
 
     if not takes:
         raise TtsError("Every subtitle line was empty - nothing to dub")
@@ -592,7 +615,51 @@ def dub(
         if changed:
             plan = schedule()
 
-    # 3) Render each take at the planned speed - nothing is trimmed.
+    # 3) Fit Voice time-warp planning (ported from CapCap time_warp_service.py):
+    #    When fit_voice_mode is "slow" or "freeze", any line that still exceeds
+    #    max_ratio stretches or freezes its video segment instead of clamping/shifting.
+    warps: list[dict[str, float | str]] = []
+    if fit_voice_mode in {"slow", "freeze"}:
+        from app.services import time_warp_service  # noqa: PLC0415
+
+        raw_warps: list[dict[str, float | str]] = []
+        for take in takes:
+            placed = plan[take.segment.index]
+            if not placed.clamped:
+                continue
+            slot_len = max(take.segment.end - take.segment.start, 0.15)
+            comfortable_len = take.seconds / min(max_ratio, 1.18)
+            extra = round(max(0.0, comfortable_len - slot_len), 3)
+            if extra >= 0.08:
+                raw_warps.append(
+                    {
+                        "type": fit_voice_mode,
+                        "time": round(take.segment.end, 3),
+                        "media_start": round(take.segment.start, 3),
+                        "media_end": round(take.segment.end, 3),
+                        "duration": extra,
+                    }
+                )
+        if raw_warps:
+            warps = time_warp_service.normalized_warps(raw_warps)
+            total_added = sum(float(w.get("duration", 0.0)) for w in warps)
+            warped_items = [
+                (
+                    t.segment.index,
+                    round(time_warp_service.media_to_timeline(t.segment.start, warps), 3),
+                    round(time_warp_service.media_to_timeline(t.segment.end, warps), 3),
+                    t.seconds,
+                )
+                for t in takes
+            ]
+            plan = plan_schedule(
+                warped_items,
+                max_ratio=max_ratio,
+                end_limit=(video_duration + total_added) if video_duration else None,
+            )
+            report(message=f"Fit Voice ({fit_voice_mode}): stretched {len(warps)} segment(s) (+{total_added:.2f}s)")
+
+    # 4) Render each take at the planned speed - nothing is trimmed.
     for take in takes:
         index = take.segment.index
         placed = plan[index]
@@ -654,6 +721,7 @@ def dub(
         reports=reports,
         skipped=skipped,
         rewritten=rewritten,
+        warps=warps,
     )
 
 

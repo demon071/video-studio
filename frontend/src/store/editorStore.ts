@@ -8,10 +8,12 @@ import type {
   AudioMode,
   ContextAnalyzeResult,
   DubbingResult,
+  FitVoiceMode,
   HardwareProfile,
   JobState,
   ModelStatus,
   QualityProfile,
+  ScaleMode,
   SettingsDocument,
   SttProvider,
   StylePresetItem,
@@ -74,6 +76,11 @@ export interface ProjectSnapshot {
   backgroundAudioPath?: string | null;
   voiceGain?: number;
   flipHorizontal?: boolean;
+  scaleMode?: ScaleMode;
+  fitVoiceMode?: FitVoiceMode;
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
   speakerVoices?: Record<string, string>;
   qualityProfile?: QualityProfile;
   useNvenc?: boolean;
@@ -197,10 +204,15 @@ interface EditorState {
   // CapCap Multi-Speaker TTS & Audio Policy
   speakerVoices: Record<string, string>;
   trimSilence: boolean;
+  fitVoiceMode: FitVoiceMode;
   // CapCap Visual Layers & Render settings
   layers: VisualLayer[];
   selectedLayerId: string | null;
   flipHorizontal: boolean;
+  scaleMode: ScaleMode;
+  brightness: number;
+  contrast: number;
+  saturation: number;
   qualityProfile: QualityProfile;
   useNvenc: boolean;
   selectionRange: [number, number] | null;
@@ -382,9 +394,14 @@ export const useEditor = create<EditorState>((set, get) => ({
   stylePresets: loadSavedStylePresets(),
   speakerVoices: {},
   trimSilence: false,
+  fitVoiceMode: "off",
   layers: [],
   selectedLayerId: null,
   flipHorizontal: false,
+  scaleMode: "fill",
+  brightness: 0,
+  contrast: 1,
+  saturation: 1,
   qualityProfile: "high",
   useNvenc: false,
   selectionRange: null,
@@ -460,6 +477,11 @@ export const useEditor = create<EditorState>((set, get) => ({
       backgroundAudioPath: snapshot.backgroundAudioPath ?? null,
       voiceGain: snapshot.voiceGain ?? 1.0,
       flipHorizontal: snapshot.flipHorizontal ?? false,
+      scaleMode: snapshot.scaleMode ?? "fill",
+      fitVoiceMode: snapshot.fitVoiceMode ?? "off",
+      brightness: snapshot.brightness ?? 0,
+      contrast: snapshot.contrast ?? 1,
+      saturation: snapshot.saturation ?? 1,
       speakerVoices: snapshot.speakerVoices ?? {},
       qualityProfile: snapshot.qualityProfile ?? get().qualityProfile,
       useNvenc: snapshot.useNvenc ?? get().useNvenc,

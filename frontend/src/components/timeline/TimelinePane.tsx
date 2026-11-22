@@ -50,6 +50,9 @@ export function TimelinePane() {
   const videoClips = useEditor((state) => state.videoClips);
   const selectedClipId = useEditor((state) => state.selectedClipId);
   const segments = useEditor((state) => state.segments);
+  const secondarySegments = useEditor((state) => state.secondarySegments);
+  const presentationMode = useEditor((state) => state.presentationMode);
+  const activeSubtitleTrack = useEditor((state) => state.activeSubtitleTrack);
   const patchSegment = useEditor((state) => state.patchSegment);
   const layers = useEditor((state) => state.layers);
   const selectedLayerId = useEditor((state) => state.selectedLayerId);
@@ -302,9 +305,23 @@ export function TimelinePane() {
           {TRACKS.map((track) => (
             <div key={track.id} className="flex h-11 items-center gap-1.5 border-b border-border/60 px-2">
               <track.icon size={11} className="text-slate-500" />
-              <span className="text-[10px] text-slate-400">{track.label}</span>
+              <span className="truncate text-[10px] text-slate-400">
+                {track.id === "subtitle" && presentationMode === "bilingual" ? "Phụ đề TS1" : track.label}
+              </span>
             </div>
           ))}
+          {presentationMode === "bilingual" && (
+            <div
+              className={`flex h-9 cursor-pointer items-center gap-1.5 border-b border-border/60 px-2 ${
+                activeSubtitleTrack === 2 ? "bg-brand/10 text-brand" : "text-slate-400"
+              }`}
+              onClick={() => update({ activeSubtitleTrack: 2 })}
+              title="Track Phụ đề phụ song ngữ (TS2)"
+            >
+              <Captions size={11} className="text-cyan-400" />
+              <span className="truncate text-[10px]">Phụ đề TS2</span>
+            </div>
+          )}
         </div>
 
         <div ref={scrollRef} className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden">
@@ -913,6 +930,31 @@ export function TimelinePane() {
                 </span>
               )}
             </div>
+
+            {/* Bilingual Secondary Subtitle (TS2) lane */}
+            {presentationMode === "bilingual" && (
+              <div className="relative h-9 border-t border-border/60 bg-cyan-950/15">
+                {(secondarySegments.length ? secondarySegments : segments).map((seg) => {
+                  const width = Math.max((seg.end - seg.start) * pps, 6);
+                  return (
+                    <div
+                      key={`ts2_${seg.index}`}
+                      data-clip
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        update({ activeSubtitleTrack: 2, selected: seg.index });
+                        setPlayhead(seg.start, { seek: true });
+                      }}
+                      className="absolute inset-y-1 flex cursor-pointer items-center overflow-hidden rounded border border-cyan-500/60 bg-cyan-600/50 px-1.5 text-[9px] text-cyan-50 hover:bg-cyan-600/75"
+                      style={{ left: seg.start * pps, width }}
+                      title={`TS2 #${seg.index}: ${seg.text}`}
+                    >
+                      <span className="truncate">{seg.text}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Selection Range Highlight */}
             {selectionRange && (

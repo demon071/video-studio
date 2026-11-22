@@ -72,6 +72,113 @@ def clean_text(text: str) -> str:
 MAX_LINE_CHARS = 21  # two of these make the 42 character cue budget
 _SPLIT_MARKS = "，。！？；：、,.!?;:…—"
 
+# CapCap auto keyword highlight lexicon & scoring (ported from CapCap/app/new_highlight_selector.py)
+_VI_STOPWORDS = frozenset({
+    "là", "và", "của", "có", "được", "trong", "cho", "với", "không", "này", "đó",
+    "những", "các", "một", "như", "thì", "mà", "ở", "để", "từ", "khi", "đã",
+    "sẽ", "đang", "rồi", "cũng", "nhưng", "hay", "hoặc", "vì", "nên", "nếu",
+    "tôi", "bạn", "anh", "em", "chị", "nó", "họ", "chúng", "ta", "mình",
+})
+_VI_POWER_WORDS = frozenset({
+    "ngay", "luôn", "nhất", "cực", "siêu", "thật", "chắc", "tuyệt", "đỉnh",
+    "bí mật", "quan trọng", "nguy hiểm", "bất ngờ", "sự thật", "cảnh báo",
+    "tuyệt đối", "không thể", "kinh khủng", "khẩn cấp", "chết", "tiền", "tỷ", "triệu",
+})
+
+
+def auto_select_keywords(text: str, max_highlights: int = 1) -> list[str]:
+    """Select 1-2 high-impact words/numbers in a subtitle cue for automatic highlight (ported from CapCap)."""
+    cleaned = clean_text(text)
+    if not cleaned:
+        return []
+    words = cleaned.split()
+    if len(words) <= 2:
+        return []
+
+    lowered_full = cleaned.lower()
+    for phrase in _VI_POWER_WORDS:
+        if " " in phrase and phrase in lowered_full:
+            idx = lowered_full.find(phrase)
+            return [cleaned[idx : idx + len(phrase)]]
+
+    best_word = ""
+    best_score = 0.0
+    for idx, word in enumerate(words):
+        w_low = word.lower().strip("()[]")
+        if not w_low or w_low in _VI_STOPWORDS:
+            continue
+        score = 0.0
+        if any(ch.isdigit() for ch in w_low):
+            score += 4.5
+        if w_low in _VI_POWER_WORDS:
+            score += 4.0
+        if len(w_low) >= 4:
+            score += min(len(w_low) * 0.35, 2.2)
+        if 0 < idx < len(words) - 1:
+            score += 0.4
+        if score > best_score:
+            best_score = score
+            best_word = word
+    return [best_word] if best_word and best_score >= 1.5 else []
+
+
+def resolve_segment_highlights(segment: SubtitleSegment, style: SubtitleStyle | None, text: str) -> list[str]:
+    """Return keywords to highlight for ``segment`` based on ``style.highlight_mode``."""
+    mode = (style.highlight_mode if style else "off") or "off"
+    if mode == "off":
+        return []
+    manual: list[str] = []
+    if segment.highlights:
+        for item in segment.highlights:
+            if isinstance(item, str) and item.strip():
+                manual.append(item.strip())
+            elif isinstance(item, dict) and str(item.get("text", "")).strip():
+                manual.append(str(item["text"]).strip())
+    if mode == "manual":
+        return manual
+    auto_kw = auto_select_keywords(text)
+    if mode == "auto":
+        return auto_kw
+    # mode == "both"
+    combined = list(manual)
+    for kw in auto_kw:
+        if kw.lower() not in {m.lower() for m in combined}:
+            combined.append(kw)
+    return combined
+
+
+def apply_ass_highlights(lines: list[str], keywords: Sequence[str], *, highlight_hex: str, primary_hex: str) -> list[str]:
+    """Wrap matched keywords in ASS colour override tags ``{\\c&HBBGGRR&}...{\\c&HPRIMARY&}``."""
+    if not keywords:
+        return lines
+    hi_ass = _ass_color(highlight_hex)
+    base_ass = _ass_color(primary_hex)
+    result: list[str] = []
+    for line in lines:
+        updated = line
+        for kw in sorted({k.strip() for k in keywords if k and k.strip()}, key=len, reverse=True):
+            pattern = re.compile(rf"(?<!\\)({re.escape(kw)})", re.IGNORECASE)
+            updated = pattern.sub(rf"{{\\c{hi_ass}}}\1{{\\c{base_ass}}}", updated, count=1)
+        result.append(updated)
+    return result
+
+
+def _animation_tags(style: SubtitleStyle | None, *, cx: int | None = None, cy: int | None = None) -> str:
+    """Build ASS override tags for CapCap entry animations (`none`, `pop`, `fade`, `pulse`, `slide_up`)."""
+    anim = (style.animation if style else "none") or "none"
+    pos_tag = f"\\pos({cx},{cy})" if cx is not None and cy is not None else ""
+    if anim == "fade":
+        return f"{pos_tag}\\fad(140,120)"
+    if anim == "pop":
+        return f"{pos_tag}\\fscx82\\fscy82\\t(0,130,\\fscx106\\fscy106)\\t(130,220,\\fscx100\\fscy100)"
+    if anim == "pulse":
+        return f"{pos_tag}\\t(0,180,\\fscx110\\fscy110)\\t(180,360,\\fscx100\\fscy100)"
+    if anim == "slide_up" and cx is not None and cy is not None:
+        return f"\\move({cx},{cy + 26},{cx},{cy},0,170)\\fad(120,90)"
+    if anim == "slide_up":
+        return "\\fad(140,90)"
+    return pos_tag
+
 
 def wrap_text(text: str, *, max_chars: int = MAX_LINE_CHARS) -> list[str]:
     """Balance one cue into at most two lines a viewer can scan.
@@ -295,10 +402,11 @@ def _box_and_text_events(
         cy = height - margin_y - box_h // 2
 
     path_cmd = _rounded_box_path(box_w, box_h, radius)
+    anim = _animation_tags(style, cx=cx, cy=cy)
     body = "\\N".join(wrapped)
     return [
-        f"Dialogue: {base_layer},{start_tc},{end_tc},{box_style_name},,0,0,0,,{{\\an5\\pos({cx},{cy})\\fscx100\\fscy100\\bord0\\shad0\\p1}}{path_cmd}{{\\p0}}",
-        f"Dialogue: {base_layer + 1},{start_tc},{end_tc},{text_style_name},,0,0,0,,{{\\bord0\\shad0\\an5\\pos({cx},{cy})}}{body}",
+        f"Dialogue: {base_layer},{start_tc},{end_tc},{box_style_name},,0,0,0,,{{\\an5{anim}\\fscx100\\fscy100\\bord0\\shad0\\p1}}{path_cmd}{{\\p0}}",
+        f"Dialogue: {base_layer + 1},{start_tc},{end_tc},{text_style_name},,0,0,0,,{{\\bord0\\shad0\\an5{anim}}}{body}",
     ]
 
 
@@ -474,26 +582,42 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if not text:
             continue
         wrapped = wrap_text(text)
+        keywords = resolve_segment_highlights(segment, style, text)
+        styled_lines = (
+            apply_ass_highlights(
+                wrapped,
+                keywords,
+                highlight_hex=style.highlight_color if style else "#FACC15",
+                primary_hex=style.color if style else primary,
+            )
+            if keywords
+            else wrapped
+        )
         start_tc = format_ass_time(segment.start)
         end_tc = format_ass_time(segment.end)
         if style is not None and style.background:
-            lines.extend(
-                _box_and_text_events(
-                    wrapped,
-                    start_tc=start_tc,
-                    end_tc=end_tc,
-                    style=style,
-                    base_size=base_size,
-                    width=width,
-                    height=height,
-                    text_style_name="DefaultText",
-                    box_style_name="DefaultBox",
-                    base_layer=0,
-                )
+            box_events = _box_and_text_events(
+                wrapped,
+                start_tc=start_tc,
+                end_tc=end_tc,
+                style=style,
+                base_size=base_size,
+                width=width,
+                height=height,
+                text_style_name="DefaultText",
+                box_style_name="DefaultBox",
+                base_layer=0,
             )
+            if keywords:
+                hi_body = "\\N".join(styled_lines)
+                plain_body = "\\N".join(wrapped)
+                box_events[-1] = box_events[-1].replace(plain_body, hi_body)
+            lines.extend(box_events)
         else:
-            body = "\\N".join(wrapped)
-            lines.append(f"Dialogue: 0,{start_tc},{end_tc},Default,,0,0,0,,{body}")
+            anim_prefix = _animation_tags(style)
+            prefix = f"{{{anim_prefix}}}" if anim_prefix else ""
+            body = "\\N".join(styled_lines)
+            lines.append(f"Dialogue: 0,{start_tc},{end_tc},Default,,0,0,0,,{prefix}{body}")
 
     if presentation_mode == "bilingual" and sec_style is not None:
         sec_source = secondary_segments if secondary_segments else segments

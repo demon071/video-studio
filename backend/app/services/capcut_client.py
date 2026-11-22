@@ -21,16 +21,19 @@ from __future__ import annotations
 
 import base64
 import binascii
+import concurrent.futures
 import datetime as dt
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import time
 import uuid
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
@@ -56,7 +59,9 @@ CAPCUT_UA = "Cronet/TTNetVersion:1d7cc3b1 2025-07-16 QuicVersion:52c2b40d 2025-0
 # 500 s per chunk keeps every upload small and every poll short; the boundary
 # risk is a single word clipped in half, which the STT answer usually repairs
 # because CapCut re-segments on its own.
-CHUNK_SECONDS = 500.0
+CHUNK_SECONDS = float(os.getenv("CAPCUT_STT_CHUNK_SECONDS", "500.0"))
+STT_OVERLAP_SECONDS = float(os.getenv("CAPCUT_STT_OVERLAP_SECONDS", "2.0"))
+STT_MAX_WORKERS = int(os.getenv("CAPCUT_STT_WORKERS", "5"))
 STT_TIMEOUT = 180.0
 TTS_TIMEOUT = 90.0
 POLL_INTERVAL = 1.0
@@ -588,6 +593,185 @@ def _download_tts(client: httpx.Client, device: dict[str, str], task_id: str, to
 
 
 # ---------------------------------------------------------------------------
+# Speech to text — helpers
+# ---------------------------------------------------------------------------
+
+def _norm_text(text: str) -> str:
+    """Normalise text for fuzzy dedup: strip punctuation, lowercase."""
+    return re.sub(r"[^\w\s]", "", str(text or "")).replace(" ", "").lower()
+
+
+def _find_overlap_suffix_prefix(s1: str, s2: str, min_len: int = 2) -> int:
+    """Return the length of the longest suffix of s1 that is a prefix of s2."""
+    max_check = min(len(s1), len(s2))
+    for length in range(max_check, min_len - 1, -1):
+        if s1[-length:] == s2[:length]:
+            return length
+    return 0
+
+
+def _plan_silence_aware_chunks(
+    audio_path: Path,
+    total_duration: float,
+    chunk_seconds: float = 500.0,
+    overlap_seconds: float = 2.0,
+    search_window: float = 20.0,
+) -> list[tuple[float, float]]:
+    """Split audio into (start, duration) chunks, cutting near silences when possible."""
+    binary = resolve_ffmpeg()
+    silences: list[tuple[float, float, float]] = []
+    if binary and total_duration > chunk_seconds + 5.0:
+        try:
+            proc = subprocess.run(
+                [
+                    str(binary), "-hide_banner", "-i", str(audio_path),
+                    "-af", "silencedetect=noise=-30dB:d=0.3",
+                    "-f", "null", "-",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                creationflags=_NO_WINDOW,
+                check=False,
+            )
+            stderr = proc.stderr or ""
+            s_starts = [float(m.group(1)) for m in re.finditer(r"silence_start:\s*([0-9.]+)", stderr)]
+            s_ends = [float(m.group(1)) for m in re.finditer(r"silence_end:\s*([0-9.]+)", stderr)]
+            for s, e in zip(s_starts, s_ends):
+                if e > s:
+                    silences.append(((s + e) / 2.0, s, e))
+        except Exception as exc:
+            log.debug("CapCut STT silence detection: %s — using fixed intervals.", exc)
+
+    chunks: list[tuple[float, float]] = []
+    cur = 0.0
+    while cur < total_duration:
+        target_end = cur + chunk_seconds
+        if target_end >= total_duration:
+            chunks.append((cur, total_duration - cur))
+            break
+
+        cut_point = target_end
+        candidates = [sil for sil in silences if target_end - search_window <= sil[0] <= target_end + search_window]
+        if candidates:
+            best = min(candidates, key=lambda c: abs(c[0] - target_end))
+            cut_point = best[0]
+
+        dur = max(10.0, cut_point - cur)
+        chunks.append((cur, dur))
+        cur = max(cur + 10.0, cut_point - overlap_seconds)
+
+    return chunks
+
+
+def _replace_transcript(target: dict, source: dict) -> None:
+    target["text"] = source["text"]
+    target.pop("words", None)
+    if "words" in source:
+        target["words"] = source["words"]
+
+
+def _merge_chunks(chunks: list[tuple[int, list[dict]]]) -> list[dict]:
+    """Merge utterances from parallel chunks, deduplicating overlapping regions."""
+    all_items = [item for _, items in chunks for item in items if str(item.get("text") or "").strip()]
+    all_items.sort(key=lambda item: (int(item.get("start_time", 0)), int(item.get("end_time", 0))))
+
+    merged: list[dict] = []
+    for item in all_items:
+        text = str(item.get("text") or "").strip()
+        start = int(item.get("start_time", 0))
+        end = int(item.get("end_time", start))
+        if end <= start:
+            end = start + 200
+        t_cur = _norm_text(text)
+        if not t_cur:
+            continue
+
+        duplicate = False
+        for idx in range(len(merged) - 1, max(-1, len(merged) - 16), -1):
+            old = merged[idx]
+            old_start = int(old.get("start_time", 0))
+            old_end = int(old.get("end_time", old_start))
+            old_text = str(old.get("text") or "").strip()
+            t_old = _norm_text(old_text)
+
+            if old_start > end + 1000 or start > old_end + 3000:
+                continue
+
+            time_overlap = max(0, min(old_end, end) - max(old_start, start))
+            dur_old = max(10, old_end - old_start)
+            dur_cur = max(10, end - start)
+
+            # 1. Exact match
+            if t_old == t_cur:
+                duplicate = True
+                break
+
+            # 2. Substring containment
+            if t_old in t_cur and (time_overlap > 250 or abs(old_start - start) < 1000):
+                old["start_time"] = min(old_start, start)
+                old["end_time"] = end
+                _replace_transcript(old, item)
+                duplicate = True
+                break
+            elif t_cur in t_old and (time_overlap > 250 or abs(old_start - start) < 1000):
+                duplicate = True
+                break
+
+            # 3. Fuzzy match with substantial time overlap
+            ratio = SequenceMatcher(None, t_old, t_cur).ratio()
+            if ratio >= 0.82 and time_overlap >= int(0.35 * min(dur_old, dur_cur)):
+                if len(t_cur) > len(t_old):
+                    old["start_time"] = min(old_start, start)
+                    old["end_time"] = max(old_end, end)
+                    _replace_transcript(old, item)
+                duplicate = True
+                break
+
+            # 4. Suffix-Prefix overlap across chunk boundary
+            overlap_len = _find_overlap_suffix_prefix(t_old, t_cur, min_len=2)
+            if overlap_len >= 2 and (time_overlap > 80 or abs(old_end - start) < 800):
+                if len(t_old) <= overlap_len + 1:
+                    old["start_time"] = min(old_start, start)
+                    old["end_time"] = end
+                    _replace_transcript(old, item)
+                    duplicate = True
+                    break
+                else:
+                    trimmed_old = old_text[:-overlap_len].strip()
+                    if trimmed_old:
+                        old["text"] = trimmed_old
+                        old["end_time"] = min(old_end, start)
+                    break
+
+        if not duplicate:
+            item["start_time"] = max(0, start)
+            item["end_time"] = max(start + 120, end)
+            merged.append(item)
+
+    # Timeline normalisation: enforce non-overlapping, monotonically increasing intervals
+    normalised: list[dict] = []
+    prev_end = 0
+    for item in merged:
+        s = int(item.get("start_time", 0))
+        e = int(item.get("end_time", s))
+        if e <= s:
+            e = s + 120
+        if s < prev_end:
+            if e <= prev_end:
+                continue
+            s = prev_end
+            if e <= s:
+                e = s + 120
+        item["start_time"] = s
+        item["end_time"] = e
+        normalised.append(item)
+        prev_end = e
+
+    return normalised
+
+
+# ---------------------------------------------------------------------------
 # Speech to text
 # ---------------------------------------------------------------------------
 def _ffmpeg(args: list[str]) -> None:
@@ -622,7 +806,7 @@ def _chunk_to_mp3(source: Path, target: Path, start: float, duration: float) -> 
             "-codec:a",
             "libmp3lame",
             "-b:a",
-            "48k",
+            "32k",
             "-y",
             str(target),
         ]
@@ -823,40 +1007,73 @@ def transcribe(
     folder = Path(work_dir)
     folder.mkdir(parents=True, exist_ok=True)
 
-    starts: list[tuple[float, float]] = []
-    position = 0.0
-    while position < duration:
-        length = min(CHUNK_SECONDS, duration - position)
-        starts.append((position, length))
-        position += length
+    # Silence-aware chunking: cut near silence boundaries to avoid splitting words
+    starts = _plan_silence_aware_chunks(
+        source,
+        total_duration=duration,
+        chunk_seconds=CHUNK_SECONDS,
+        overlap_seconds=STT_OVERLAP_SECONDS,
+    )
 
-    lines: list[tuple[float, float, str]] = []
-    report(stage="upload", fraction=0.02, message=f"CapCut STT: {len(starts)} chunk(s)")
+    n_chunks = len(starts)
+    report(stage="upload", fraction=0.02, message=f"CapCut STT: {n_chunks} chunk(s), up to {STT_MAX_WORKERS} parallel")
+    log.info("CapCut STT: %d chunk(s), silence-aware=%s, max_workers=%d", n_chunks, len(starts) > 1, STT_MAX_WORKERS)
 
-    with httpx.Client(timeout=120.0) as client:
-        for index, (start, length) in enumerate(starts):
-            device = stt_device()
-            report(
-                stage="upload",
-                fraction=0.02 + 0.9 * index / len(starts),
-                message=f"CapCut chunk {index + 1}/{len(starts)}",
-            )
-            chunk = _chunk_to_mp3(source, folder / f"capcut_{index:03d}.mp3", start, length)
-            try:
+    completed: list[tuple[int, list[dict]]] = []
+
+    def _process_chunk(index: int, start: float, length: float) -> tuple[int, list[dict]]:
+        device = stt_device()
+        chunk_path = folder / f"capcut_{index:03d}.mp3"
+        chunk = _chunk_to_mp3(source, chunk_path, start, length)
+        try:
+            with httpx.Client(timeout=120.0) as client:
                 credentials = _upload_credentials(client, device)
                 store_uri = _upload(client, device, chunk, credentials)
                 task_id = _submit(client, device, store_uri, int(length * 1000))
                 utterances = _await_utterances(client, device, task_id)
-            finally:
-                chunk.unlink(missing_ok=True)
-
+            # Adjust utterance timestamps to be absolute (relative to full audio)
             for item in utterances:
-                text = str(item.get("text") or "").strip()
-                if not text:
-                    continue
-                left = start + float(item.get("start_time") or 0) / 1000.0
-                right = start + float(item.get("end_time") or 0) / 1000.0
-                lines.append((round(left, 3), round(max(right, left + 0.2), 3), text))
+                item["start_time"] = int(item.get("start_time") or 0) + int(start * 1000)
+                item["end_time"] = int(item.get("end_time") or 0) + int(start * 1000)
+            return index, utterances
+        finally:
+            chunk.unlink(missing_ok=True)
+
+    if n_chunks == 1:
+        # Single chunk — no need for thread pool overhead
+        start0, length0 = starts[0]
+        report(stage="upload", fraction=0.5, message="CapCut chunk 1/1")
+        idx, utterances = _process_chunk(0, start0, length0)
+        completed = [(idx, utterances)]
+    else:
+        workers = min(STT_MAX_WORKERS, n_chunks)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_process_chunk, i, s, l): i
+                for i, (s, l) in enumerate(starts)
+            }
+            done_count = 0
+            for fut in concurrent.futures.as_completed(futures):
+                idx, utterances = fut.result()  # propagates exceptions
+                completed.append((idx, utterances))
+                done_count += 1
+                frac = 0.02 + 0.90 * done_count / n_chunks
+                report(
+                    stage="upload",
+                    fraction=frac,
+                    message=f"CapCut chunk {done_count}/{n_chunks} done",
+                )
+
+    # Merge & dedup parallel-chunk results into a final ordered list
+    raw_items = _merge_chunks(completed)
+    lines: list[tuple[float, float, str]] = []
+    for item in raw_items:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        left = float(item.get("start_time") or 0) / 1000.0
+        right = float(item.get("end_time") or 0) / 1000.0
+        lines.append((round(left, 3), round(max(right, left + 0.2), 3), text))
 
     report(stage="transcribe", fraction=0.95, message=f"CapCut returned {len(lines)} line(s)")
     return lines

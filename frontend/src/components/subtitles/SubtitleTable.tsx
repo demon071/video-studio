@@ -1,4 +1,19 @@
-import { ChevronLeft, ChevronsRight, History, Loader2, Merge, Plus, RotateCw, ScanText, Split, Trash2, Volume2 } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronsRight,
+  Clock,
+  History,
+  Loader2,
+  Merge,
+  Plus,
+  RotateCw,
+  ScanText,
+  Search,
+  SlidersHorizontal,
+  Split,
+  Trash2,
+  Volume2,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { CueReadingDialog } from "@/components/subtitles/CueReadingDialog";
@@ -7,6 +22,17 @@ import { formatSrtTime, parseTimecode } from "@/lib/format";
 import { listenCue, regenerateCue } from "@/lib/tasks";
 import { selectActiveSegment, staleCues, useEditor } from "@/store/editorStore";
 import type { DubbingSegmentReport, SubtitleSegment } from "@/types/editor";
+
+const SPEAKER_COLORS = ["#38BDF8", "#F472B6", "#34D399", "#FBBF24", "#A78BFA", "#FB923C"];
+
+function speakerBadgeColor(speaker: string | null | undefined): string | null {
+  if (!speaker) return null;
+  let hash = 0;
+  for (let i = 0; i < speaker.length; i += 1) {
+    hash = (hash * 31 + speaker.charCodeAt(i)) | 0;
+  }
+  return SPEAKER_COLORS[Math.abs(hash) % SPEAKER_COLORS.length];
+}
 
 /**
  * Subtitle editor — the column to the right of the preview.
@@ -47,7 +73,56 @@ export function SubtitleTable() {
 
   /** Cue whose frame is being read again; the dialog does the rest. */
   const [readingCue, setReadingCue] = useState<SubtitleSegment | null>(null);
+  const [showTools, setShowTools] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [replaceQuery, setReplaceQuery] = useState("");
+  const [shiftSeconds, setShiftSeconds] = useState("0.20");
+  const [expandedCueIndex, setExpandedCueIndex] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  const handleReplaceAll = () => {
+    const q = searchQuery.trim();
+    if (!q) return;
+    let count = 0;
+    const next = segments.map((seg) => {
+      let changed = false;
+      let nextText = seg.text;
+      let nextTrans = seg.translation ?? "";
+      if (nextText.includes(q)) {
+        nextText = nextText.split(q).join(replaceQuery);
+        changed = true;
+      }
+      if (nextTrans.includes(q)) {
+        nextTrans = nextTrans.split(q).join(replaceQuery);
+        changed = true;
+      }
+      if (changed) count += 1;
+      return changed ? { ...seg, text: nextText, translation: nextTrans } : seg;
+    });
+    if (count > 0) {
+      update({ segments: next, dubDirty: dub !== null, projectDirty: true });
+      useEditor.getState().pushLog("success", `Đã thay thế "${q}" → "${replaceQuery}" trong ${count} dòng.`);
+    } else {
+      useEditor.getState().pushLog("warn", `Không tìm thấy "${q}" trong bảng phụ đề.`);
+    }
+  };
+
+  const handleShiftTiming = (deltaSec: number) => {
+    if (!Number.isFinite(deltaSec) || Math.abs(deltaSec) < 0.001 || !segments.length) return;
+    const next = segments.map((seg) => {
+      const len = Math.max(0.2, seg.end - seg.start);
+      const ns = Math.max(0, Number((seg.start + deltaSec).toFixed(3)));
+      return {
+        ...seg,
+        start: ns,
+        end: Number((ns + len).toFixed(3)),
+      };
+    });
+    update({ segments: next, dubDirty: dub !== null, projectDirty: true });
+    useEditor
+      .getState()
+      .pushLog("info", `Đã dịch thời gian toàn bộ phụ đề ${deltaSec > 0 ? `+${deltaSec.toFixed(2)}s` : `${deltaSec.toFixed(2)}s`}`);
+  };
 
   useEffect(() => {
     if (selected === null || collapsed) return;
@@ -195,6 +270,13 @@ export function SubtitleTable() {
         )}
         <div className="ml-auto flex items-center gap-1">
           <button
+            className={`text-slate-500 hover:text-brand ${showTools ? "text-brand" : ""}`}
+            title="Công cụ hàng loạt: Tìm & Thay thế · Dịch thời gian ±giây"
+            onClick={() => setShowTools((v) => !v)}
+          >
+            <Search size={11} />
+          </button>
+          <button
             className="text-slate-500 hover:text-amber-300 disabled:opacity-40"
             title="Khôi phục mốc thời gian gốc ban đầu (Restore Original Timing)"
             disabled={!segments.some((s) => s.original_start != null)}
@@ -228,6 +310,58 @@ export function SubtitleTable() {
           </button>
         </div>
       </header>
+
+      {showTools && (
+        <div className="space-y-1.5 border-b border-border bg-surface-2 px-2.5 py-2 text-[10px]">
+          <div className="flex items-center gap-1">
+            <input
+              className="field flex-1 !px-1.5 !py-0.5 !text-[10px]"
+              value={searchQuery}
+              placeholder="Tìm chữ…"
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            <input
+              className="field flex-1 !px-1.5 !py-0.5 !text-[10px]"
+              value={replaceQuery}
+              placeholder="Thay bằng…"
+              onChange={(e) => setReplaceQuery(e.target.value)}
+            />
+            <button
+              className="btn-ghost !px-2 !py-0.5 !text-[10px] text-brand"
+              disabled={!searchQuery.trim() || !segments.length}
+              onClick={handleReplaceAll}
+            >
+              Thay tất cả
+            </button>
+          </div>
+          <div className="flex items-center gap-1">
+            <Clock size={10} className="text-slate-500" />
+            <span className="text-slate-400">Dịch thời gian:</span>
+            <input
+              type="number"
+              step={0.05}
+              className="field !w-16 !px-1 !py-0.5 font-mono !text-[10px]"
+              value={shiftSeconds}
+              onChange={(e) => setShiftSeconds(e.target.value)}
+            />
+            <span className="text-slate-500">giây</span>
+            <button
+              className="btn-ghost ml-auto !px-1.5 !py-0.5 !text-[10px]"
+              disabled={!segments.length}
+              onClick={() => handleShiftTiming(-Math.abs(Number(shiftSeconds) || 0.2))}
+            >
+              − Sớm hơn
+            </button>
+            <button
+              className="btn-ghost !px-1.5 !py-0.5 !text-[10px]"
+              disabled={!segments.length}
+              onClick={() => handleShiftTiming(Math.abs(Number(shiftSeconds) || 0.2))}
+            >
+              + Trễ hơn
+            </button>
+          </div>
+        </div>
+      )}
 
       <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto">
         {segments.length === 0 && (
@@ -272,10 +406,14 @@ export function SubtitleTable() {
                 <TimeInput value={segment.end} onCommit={(value) => patchSegment(segment.index, { end: value })} />
 
                 <input
-                  className="field !w-14 !px-1 !py-0.5 font-mono !text-[9px] text-brand"
+                  className="field !w-14 !px-1 !py-0.5 font-mono !text-[9px]"
+                  style={{
+                    color: speakerBadgeColor(segment.speaker) || "#38BDF8",
+                    borderColor: segment.speaker ? `${speakerBadgeColor(segment.speaker)}66` : undefined,
+                  }}
                   value={segment.speaker ?? ""}
                   placeholder="SPK"
-                  title="Người nói (Speaker ID)"
+                  title="Người nói (Speaker ID — tự tô màu theo nhân vật)"
                   onChange={(e) => patchSegment(segment.index, { speaker: e.target.value || null })}
                 />
 
@@ -370,6 +508,20 @@ export function SubtitleTable() {
                 </button>
 
                 <button
+                  className={`shrink-0 ${
+                    expandedCueIndex === segment.index || segment.voice || segment.speed || segment.highlights?.length
+                      ? "text-brand"
+                      : "text-slate-600 hover:text-slate-300"
+                  }`}
+                  title="Tuỳ chỉnh nâng cao cho dòng này: Giọng đọc riêng · Tốc độ đọc riêng · Từ khóa Highlight"
+                  onClick={() =>
+                    setExpandedCueIndex((prev) => (prev === segment.index ? null : segment.index))
+                  }
+                >
+                  <SlidersHorizontal size={11} />
+                </button>
+
+                <button
                   className="shrink-0 text-slate-600 hover:text-rose-400"
                   title="Xoá dòng"
                   onClick={() => removeSegment(segment.index)}
@@ -377,6 +529,57 @@ export function SubtitleTable() {
                   <Trash2 size={11} />
                 </button>
               </div>
+
+              {expandedCueIndex === segment.index && (
+                <div className="mt-1 grid grid-cols-3 gap-1 rounded border border-border/70 bg-surface-2 p-1.5 text-[9px]">
+                  <label className="space-y-0.5">
+                    <span className="text-slate-400">Giọng riêng (Voice)</span>
+                    <input
+                      className="field !px-1 !py-0.5 font-mono !text-[9px]"
+                      value={segment.voice ?? ""}
+                      placeholder="Mặc định"
+                      onChange={(e) =>
+                        patchSegment(segment.index, { voice: e.target.value.trim() || null })
+                      }
+                    />
+                  </label>
+                  <label className="space-y-0.5">
+                    <span className="text-slate-400">Tốc độ (×)</span>
+                    <input
+                      type="number"
+                      step={0.05}
+                      min={0.5}
+                      max={2.0}
+                      className="field !px-1 !py-0.5 font-mono !text-[9px]"
+                      value={segment.speed ?? ""}
+                      placeholder="1.0"
+                      onChange={(e) =>
+                        patchSegment(segment.index, {
+                          speed: e.target.value ? Number(e.target.value) : null,
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="space-y-0.5">
+                    <span className="text-amber-300">Highlight (phẩy)</span>
+                    <input
+                      className="field !px-1 !py-0.5 !text-[9px]"
+                      value={(segment.highlights ?? [])
+                        .map((h) => (typeof h === "string" ? h : String(h.text ?? "")))
+                        .filter(Boolean)
+                        .join(", ")}
+                      placeholder="từ 1, từ 2"
+                      onChange={(e) => {
+                        const list = e.target.value
+                          .split(",")
+                          .map((s) => s.trim())
+                          .filter(Boolean);
+                        patchSegment(segment.index, { highlights: list.length ? list : null });
+                      }}
+                    />
+                  </label>
+                </div>
+              )}
 
               <textarea
                 className="field mt-1 min-h-[2rem] w-full resize-none !px-1.5 !py-1 !text-[11px] leading-snug"

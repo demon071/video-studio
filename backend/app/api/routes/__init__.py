@@ -15,6 +15,7 @@ from app.api.routes import (
     queue,
     render,
     settings,
+    styles,
     subtitles,
     system,
 )
@@ -22,6 +23,7 @@ from app.api.routes import (
 api_router = APIRouter()
 api_router.include_router(system.router)
 api_router.include_router(settings.router)
+api_router.include_router(styles.router)
 api_router.include_router(ai_pack.router)
 api_router.include_router(models.router)
 api_router.include_router(media.router)
